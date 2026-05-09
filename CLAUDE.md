@@ -4,6 +4,14 @@ Persistent canvas display panel for Claude Code sessions. A Go binary that is si
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for a full explanation of the three-part system.
 
+## Keeping Docs Current
+
+When making changes to this codebase, update `CLAUDE.md` and `ARCHITECTURE.md` in the same commit:
+- New subcommands → update Repository Layout, Common Tasks, and the protocol tables in ARCHITECTURE.md
+- New keybindings → update the keybindings table in ARCHITECTURE.md
+- Skill changes → update the Skills section in ARCHITECTURE.md
+- Protocol changes → update the Protocol Reference tables in ARCHITECTURE.md
+
 ## Build & Install
 
 ```bash
@@ -15,7 +23,7 @@ make clean    # removes ./tui-canvas
 
 Always use `make build` / `make install` rather than calling `go build` directly.
 
-After `make install`, the running daemon must be restarted to pick up binary changes — the daemon auto-starts when the TUI is launched.
+After `make install`, the running daemon must be restarted to pick up binary changes. Press `R` in the TUI or run `tui-canvas restart` — connected TUIs reconnect automatically.
 
 ## Repository Layout
 
@@ -50,13 +58,24 @@ The daemon persists session registrations to `~/.local/share/tui-canvas/sessions
 
 ## Common Tasks
 
-**Finding the session ID after `/clear`:** run `tui-canvas list --cwd "$(pwd)"` — returns tab-separated `id name cwd` rows. Or press `?` in the TUI to toggle debug mode, which shows session IDs inline.
+**Finding the session ID after `/clear`:** run `tui-canvas list` — returns tab-separated `id name cwd` rows. Or press `?` in the TUI to toggle debug mode, which shows session IDs inline.
 
 **Sending content to the canvas:**
 ```bash
-python3 -c "
-import json, subprocess
-msg = json.dumps({'type': 'canvas_append', 'session_id': 'SESSION_ID', 'content': 'markdown here'})
-subprocess.run(['tui-canvas', 'send'], input=msg.encode())
-"
+tui-canvas append SESSION_ID <<'EOF'
+markdown content here
+EOF
 ```
+
+**Clearing a session canvas:**
+```bash
+tui-canvas clear SESSION_ID
+```
+
+**Restarting the daemon** (required after `make install` to pick up binary changes):
+```bash
+tui-canvas restart   # TUIs reconnect automatically
+# or press R inside the TUI
+```
+
+**Killing a tab:** press `x` in the TUI, then `x` again to confirm. Removes the session and all its canvas entries from persistent state.
