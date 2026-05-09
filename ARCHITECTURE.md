@@ -7,8 +7,10 @@ tui-canvas is three cooperating subsystems in a single Go binary: a **daemon**, 
 │  Claude Code session (one per terminal tab)          │
 │                                                      │
 │  SessionStart hook ──registers──► daemon             │
-│  /tui-canvas skill ──appends──►  daemon              │
-│  /tui-clear skill  ──clears──►   daemon              │
+│                    └──writes──►  session-$ID tempfile│
+│  /tui-canvas skill ──writes──►  pending-$ID staging  │
+│  Stop hook         ──appends──► daemon (via staging) │
+│  /tui-clear skill  ──clears──►  daemon               │
 └─────────────────────────────────────────────────────┘
                                        │
                               Unix socket (tui.sock)
@@ -96,27 +98,27 @@ The TUI client is what the user looks at. It runs in the foreground (`tui-canvas
 
 The plugin integrates tui-canvas into Claude Code. It has two components: a hook and skills.
 
-### Hook: `plugin/hooks/session-start`
+### Hooks
 
-Runs at `SessionStart` (every time Claude Code starts a session). It:
-1. Generates a UUID (via `uuidgen` or Python fallback)
-2. If the daemon socket exists, sends `session_register` with the UUID, project name, and CWD
-3. Emits the session ID into Claude's context via `hookSpecificOutput.additionalContext`
+**`plugin/hooks/session-start`** — runs at `SessionStart`:
+1. Generates a UUID (via `uuidgen` or Python fallback); reuses existing session for the same CWD
+2. Sends `session_register` to the daemon
+3. Writes the tui-canvas session ID to `~/.local/share/tui-canvas/session-$CLAUDE_CODE_SESSION_ID` (keyed by Claude session ID)
+4. Returns `{}` (no `additionalContext` — session ID stays out of Claude's context)
 
-The emitted string `[tui-canvas] Your session ID is: <UUID>` is what skills look for in context. If the context is lost (e.g., after `/clear`), skills fall back to `tui-canvas list`.
+**`plugin/hooks/stop-push`** — runs at `Stop` (after every turn):
+1. Checks for a staging file `~/.local/share/tui-canvas/pending-$CLAUDE_CODE_SESSION_ID`
+2. If absent, exits immediately (no-op — this is the common case)
+3. If present and fresh (<5 min), reads the session ID from the temp file and calls `tui-canvas append`
+4. If content is the sentinel `PUSH_PREV_ASSISTANT`, parses `~/.claude/projects/*/SESSION_ID.jsonl` to find the previous assistant message before the `/tui-canvas` invocation
 
 ### Skills
 
 Both skills run as Haiku (specified via `model:` frontmatter in SKILL.md) to minimise token cost.
 
-**Session ID resolution order (both skills):**
-1. Scan context for `[tui-canvas] Your session ID is: <UUID>`
-2. Run `tui-canvas list` (no args, no pipes) and take the last line's first field
-3. Fail silently with a hint to press `?` in the TUI
+**`/tui-canvas`** — writes content to the staging file `pending-$CLAUDE_CODE_SESSION_ID` (one `tee` heredoc call). The `stop-push` hook performs the actual daemon append after the turn. For bare `/tui-canvas` with no arguments, writes the sentinel `PUSH_PREV_ASSISTANT` so the stop hook pushes the previous assistant turn.
 
-**`/tui-canvas`** — appends content to the canvas via `tui-canvas append <id>` (reads markdown from stdin). Content is the visible assistant response text; thinking blocks are excluded.
-
-**`/tui-clear`** — clears the canvas via `tui-canvas clear <id>`.
+**`/tui-clear`** — reads the session ID from `session-$CLAUDE_CODE_SESSION_ID` (fast file read, no socket call) and calls `tui-canvas clear <id>`. Falls back to `tui-canvas list --cwd` if the temp file is missing.
 
 ---
 

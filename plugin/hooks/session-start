@@ -43,4 +43,7 @@ if [ -S "$SOCKET" ]; then
   fi
 fi
 
-printf '{"hookSpecificOutput":{"additionalContext":"[tui-canvas] Your session ID is: %s"}}\n' "$SESSION_ID"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tui-canvas"
+printf '%s' "$SESSION_ID" > "$DATA_DIR/session-${CLAUDE_CODE_SESSION_ID:-unknown}"
+
+printf '{}\n'

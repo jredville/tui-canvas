@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tui-canvas"
+SOCKET="$DATA_DIR/tui.sock"
+[ -S "$SOCKET" ] || exit 0
+
+STAGING="$DATA_DIR/pending-${CLAUDE_CODE_SESSION_ID:-}"
+[ -f "$STAGING" ] || exit 0
+
+# Skip stale files (older than 5 minutes — guards against crash leftovers)
+if [ $(( $(date +%s) - $(stat -c %Y "$STAGING" 2>/dev/null || echo 0) )) -gt 300 ]; then
+  rm -f "$STAGING"
+  exit 0
+fi
+
+SESSION_FILE="$DATA_DIR/session-${CLAUDE_CODE_SESSION_ID:-}"
+if [ ! -f "$SESSION_FILE" ]; then rm -f "$STAGING"; exit 0; fi
+SESSION_ID=$(cat "$SESSION_FILE")
+[ -n "$SESSION_ID" ] || { rm -f "$STAGING"; exit 0; }
+
+CONTENT=$(cat "$STAGING")
+rm -f "$STAGING"
+
+if [ "$CONTENT" = "PUSH_PREV_ASSISTANT" ]; then
+  TRANSCRIPT=$(find ~/.claude/projects -name "${CLAUDE_CODE_SESSION_ID}.jsonl" 2>/dev/null | head -1)
+  [ -n "$TRANSCRIPT" ] || exit 0
+  CONTENT=$(python3 - "$TRANSCRIPT" <<'PYEOF'
+import json, sys
+msgs = []
+with open(sys.argv[1]) as f:
+    for line in f:
+        line = line.strip()
+        if line:
+            try: msgs.append(json.loads(line))
+            except: pass
+
+def extract_text(content):
+    if isinstance(content, str): return content
+    if isinstance(content, list):
+        return '\n'.join(p.get('text','') for p in content if isinstance(p,dict) and p.get('type')=='text')
+    return ''
+
+# Find last /tui-canvas user message, then get assistant message before it
+tui_idx = None
+for i, m in enumerate(reversed(msgs)):
+    if m.get('type') == 'user':
+        text = extract_text(m.get('message',{}).get('content',''))
+        if text.strip().startswith('/tui-canvas'):
+            tui_idx = len(msgs) - 1 - i
+            break
+
+if tui_idx is None: sys.exit(0)
+
+for m in reversed(msgs[:tui_idx]):
+    if m.get('type') == 'assistant':
+        text = extract_text(m.get('message',{}).get('content',''))
+        if text.strip():
+            print(text.strip())
+            break
+PYEOF
+  ) || exit 0
+  [ -n "$CONTENT" ] || exit 0
+fi
+
+printf '%s' "$CONTENT" | tui-canvas append "$SESSION_ID" 2>/dev/null || true
+printf '{}\n'

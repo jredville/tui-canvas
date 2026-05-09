@@ -4,31 +4,26 @@ model: claude-haiku-4-5-20251001
 
 # /tui-canvas
 
-Send content to the tui-canvas display panel.
+Push content to the tui-canvas display panel.
 
 ## Instructions
 
-1. Find the session ID using the first method that succeeds:
-   - **a)** Look for `[tui-canvas] Your session ID is: <UUID>` in your context. Extract the UUID.
-   - **b)** Run `tui-canvas list` (no extra args, no pipes) and read the session ID from the last line of output. The format is `id<TAB>name<TAB>cwd` — take the first field of the last row.
-   - **c)** If neither works, tell the user the canvas is not available and suggest pressing `?` in the TUI to reveal session IDs.
+1. Determine the content:
+   - If the user provided text after `/tui-canvas`, use that text.
+   - If nothing was provided, use the literal string `PUSH_PREV_ASSISTANT` as the content — the stop hook will push the previous assistant response.
 
-2. Determine the content:
-   - If the user provided text after `/tui-canvas`, use that.
-   - Otherwise, use the **visible assistant response text only** — the text the user can read. Do not include internal thinking or reasoning.
-
-3. Send to canvas using `tui-canvas append` with a heredoc:
+2. Write the content to the staging file with a heredoc:
 
 ```bash
-tui-canvas append SESSION_ID_HERE <<'EOF'
+tee "${XDG_DATA_HOME:-$HOME/.local/share}/tui-canvas/pending-$CLAUDE_CODE_SESSION_ID" > /dev/null <<'EOF'
 CONTENT_HERE
 EOF
 ```
 
-4. Confirm to the user: "Sent to canvas."
+3. Tell the user: "Pushed to canvas."
 
 ## Notes
 
-- If `tui-canvas append` fails or the daemon is not running, fail silently and tell the user the canvas is not available.
+- The stop hook reads the staging file after this turn and performs the actual append — no further tool calls needed.
 - Content is rendered as markdown in the TUI.
-- Press `?` in the TUI to toggle debug mode, which shows the session ID for each tab.
+- If the daemon is not running the push fails silently.

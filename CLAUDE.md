@@ -38,8 +38,9 @@ internal/
 plugin/
   .claude-plugin/plugin.json  plugin manifest
   hooks/
-    hooks.json                SessionStart hook declaration
-    session-start             bash script: registers session, emits session ID
+    hooks.json                SessionStart + Stop hook declarations
+    session-start             bash script: registers session, writes session-$ID temp file
+    stop-push                 bash script: reads staging file, appends to canvas after each turn
   skills/
     tui-canvas/SKILL.md       /tui-canvas skill (send content to canvas)
     tui-clear/SKILL.md        /tui-clear skill (clear canvas)
