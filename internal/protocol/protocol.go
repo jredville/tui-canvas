@@ -48,6 +48,19 @@ type CanvasClear struct {
 	SessionID string `json:"session_id"`
 }
 
+// ListSessions requests the list of registered sessions from the daemon.
+// An optional CWD filter restricts results to sessions from that directory.
+type ListSessions struct {
+	Type string `json:"type"` // "list_sessions"
+	CWD  string `json:"cwd,omitempty"`
+}
+
+// SessionsList is the daemon's response to ListSessions.
+type SessionsList struct {
+	Type     string    `json:"type"` // "sessions_list"
+	Sessions []Session `json:"sessions"`
+}
+
 // Subscribe is sent by a TUI client to become a long-lived subscriber.
 type Subscribe struct {
 	Type string `json:"type"` // "subscribe"

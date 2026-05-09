@@ -6,6 +6,8 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -29,6 +31,9 @@ func main() {
 		case "send":
 			runSend()
 			return
+		case "list":
+			runList()
+			return
 		case "--help", "-h", "help":
 			printUsage()
 			return
@@ -41,10 +46,11 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, `tui-canvas — persistent canvas display panel for Claude sessions
 
 Usage:
-  tui-canvas           Start the TUI client (auto-starts daemon)
-  tui-canvas daemon    Run the background state server
-  tui-canvas send      Read JSON from stdin and write to socket
-  tui-canvas help      Show this help message`)
+  tui-canvas                  Start the TUI client (auto-starts daemon)
+  tui-canvas daemon           Run the background state server
+  tui-canvas send             Read JSON from stdin and write to socket
+  tui-canvas list [--cwd DIR] List registered sessions (tab-separated: id name cwd)
+  tui-canvas help             Show this help message`)
 }
 
 // isDaemonRunning returns true when the socket exists and accepts connections.
@@ -107,6 +113,54 @@ func runTUI() {
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "tui-canvas: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// runList queries the daemon for registered sessions and prints them to stdout,
+// one per line, tab-separated: session_id<TAB>name<TAB>cwd.
+// Pass --cwd <dir> to filter by working directory.
+func runList() {
+	if !isDaemonRunning() {
+		return
+	}
+
+	var cwd string
+	args := os.Args[2:]
+	for i, arg := range args {
+		if arg == "--cwd" && i+1 < len(args) {
+			cwd = args[i+1]
+			break
+		}
+	}
+
+	conn, err := net.DialTimeout("unix", protocol.SocketPath(), time.Second)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	req := protocol.ListSessions{Type: "list_sessions", CWD: cwd}
+	b, err := protocol.Encode(req)
+	if err != nil {
+		return
+	}
+	if _, err := conn.Write(b); err != nil {
+		return
+	}
+
+	reader := bufio.NewReader(conn)
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		return
+	}
+
+	var resp protocol.SessionsList
+	if err := json.Unmarshal(line, &resp); err != nil {
+		return
+	}
+
+	for _, s := range resp.Sessions {
+		fmt.Printf("%s\t%s\t%s\n", s.ID, s.Name, s.CWD)
 	}
 }
 

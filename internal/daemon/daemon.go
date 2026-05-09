@@ -17,6 +17,39 @@ import (
 	"tui-canvas/internal/protocol"
 )
 
+func sessionsPath(sockPath string) string {
+	return filepath.Join(filepath.Dir(sockPath), "sessions.json")
+}
+
+func loadSessions(path string) ([]protocol.Session, map[string]int) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, make(map[string]int)
+	}
+	var sessions []protocol.Session
+	if err := json.Unmarshal(data, &sessions); err != nil {
+		return nil, make(map[string]int)
+	}
+	nextIdx := make(map[string]int, len(sessions))
+	for _, s := range sessions {
+		nextIdx[s.ID] = len(s.Entries) + 1
+	}
+	return sessions, nextIdx
+}
+
+func saveSessions(st *state) {
+	if st.stateFile == "" {
+		return
+	}
+	st.mu.RLock()
+	data, err := json.Marshal(st.sessions)
+	st.mu.RUnlock()
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(st.stateFile, data, 0o644)
+}
+
 // subscriber represents a connected TUI client.
 type subscriber struct {
 	send chan []byte
@@ -25,9 +58,10 @@ type subscriber struct {
 
 // state is the daemon's canonical session store.
 type state struct {
-	mu       sync.RWMutex
-	sessions []protocol.Session
-	nextIdx  map[string]int // session_id → next entry index
+	mu        sync.RWMutex
+	sessions  []protocol.Session
+	nextIdx   map[string]int // session_id → next entry index
+	stateFile string
 }
 
 // snapshot returns a deep copy of the current sessions slice, safe to use
@@ -101,7 +135,9 @@ func Run() {
 		return
 	}
 
-	st := &state{nextIdx: make(map[string]int)}
+	stateFile := sessionsPath(sockPath)
+	sessions, nextIdx := loadSessions(stateFile)
+	st := &state{sessions: sessions, nextIdx: nextIdx, stateFile: stateFile}
 	bc := newBroadcaster()
 
 	// Clean up on signal.
@@ -222,6 +258,7 @@ func handlePluginMessage(msgType string, raw []byte, conn net.Conn, st *state, b
 		})
 		st.nextIdx[msg.SessionID] = 1
 		st.mu.Unlock()
+		saveSessions(st)
 
 		out := protocol.SessionAdded{
 			Type:      "session_added",
@@ -250,6 +287,7 @@ func handlePluginMessage(msgType string, raw []byte, conn net.Conn, st *state, b
 		}
 		st.nextIdx[msg.SessionID] = idx + 1
 		st.mu.Unlock()
+		saveSessions(st)
 
 		out := protocol.CanvasAppended{
 			Type:      "canvas_appended",
@@ -275,6 +313,7 @@ func handlePluginMessage(msgType string, raw []byte, conn net.Conn, st *state, b
 		}
 		st.nextIdx[msg.SessionID] = 1
 		st.mu.Unlock()
+		saveSessions(st)
 
 		out := protocol.CanvasCleared{
 			Type:      "canvas_cleared",
@@ -282,6 +321,30 @@ func handlePluginMessage(msgType string, raw []byte, conn net.Conn, st *state, b
 		}
 		if b, err := protocol.Encode(out); err == nil {
 			bc.broadcast(b)
+		}
+
+	case "list_sessions":
+		var msg protocol.ListSessions
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			return
+		}
+
+		st.mu.RLock()
+		var sessions []protocol.Session
+		for _, s := range st.sessions {
+			if msg.CWD == "" || s.CWD == msg.CWD {
+				sessions = append(sessions, protocol.Session{
+					ID:   s.ID,
+					Name: s.Name,
+					CWD:  s.CWD,
+				})
+			}
+		}
+		st.mu.RUnlock()
+
+		out := protocol.SessionsList{Type: "sessions_list", Sessions: sessions}
+		if b, err := protocol.Encode(out); err == nil {
+			_, _ = conn.Write(b)
 		}
 	}
 }

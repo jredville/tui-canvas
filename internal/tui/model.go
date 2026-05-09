@@ -27,6 +27,7 @@ type Model struct {
 	ch        chan tea.Msg
 	renderer  *glamour.TermRenderer
 	ready     bool
+	debug     bool
 	err       error
 	width     int
 	height    int
@@ -105,6 +106,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+
+		case "?":
+			m.debug = !m.debug
+			return m, nil
 
 		case "tab":
 			if len(m.sessions) > 0 {
