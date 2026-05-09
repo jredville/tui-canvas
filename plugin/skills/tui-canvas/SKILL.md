@@ -10,12 +10,14 @@ Send content to the tui-canvas display panel.
 
 1. Find the session ID using the first method that succeeds:
    - **a)** Look for `[tui-canvas] Your session ID is: <UUID>` in your context. Extract the UUID.
-   - **b)** Run `tui-canvas list --cwd "$(pwd)"` and use the **last** session ID from the output — it is the most recently registered session. Extract with: `tui-canvas list --cwd "$(pwd)" | tail -1 | cut -f1`
+   - **b)** Run `tui-canvas list` (no extra args, no pipes) and read the session ID from the last line of output. The format is `id<TAB>name<TAB>cwd` — take the first field of the last row.
    - **c)** If neither works, tell the user the canvas is not available and suggest pressing `?` in the TUI to reveal session IDs.
 
-2. If the user provided text after `/tui-canvas`, use that as the content. Otherwise, use the previous assistant response.
+2. Determine the content:
+   - If the user provided text after `/tui-canvas`, use that.
+   - Otherwise, use the **visible assistant response text only** — the text the user can read. Do not include internal thinking or reasoning.
 
-3. Send to canvas:
+3. Send to canvas using `tui-canvas append` with a heredoc:
 
 ```bash
 tui-canvas append SESSION_ID_HERE <<'EOF'
@@ -27,6 +29,6 @@ EOF
 
 ## Notes
 
-- If `tui-canvas send` fails or the daemon is not running, fail silently and tell the user the canvas is not available.
+- If `tui-canvas append` fails or the daemon is not running, fail silently and tell the user the canvas is not available.
 - Content is rendered as markdown in the TUI.
 - Press `?` in the TUI to toggle debug mode, which shows the session ID for each tab.
