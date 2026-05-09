@@ -5,28 +5,26 @@ DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tui-canvas"
 SOCKET="$DATA_DIR/tui.sock"
 [ -S "$SOCKET" ] || exit 0
 
-STAGING="$DATA_DIR/pending-${CLAUDE_CODE_SESSION_ID:-}"
-[ -f "$STAGING" ] || exit 0
+# Read hook event JSON from stdin
+INPUT=$(cat)
+CLAUDE_SESSION=$(printf '%s' "$INPUT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('session_id',''))" 2>/dev/null || echo "")
+TRANSCRIPT=$(printf '%s' "$INPUT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('transcript_path',''))" 2>/dev/null || echo "")
 
-# Skip stale files (older than 5 minutes — guards against crash leftovers)
-if [ $(( $(date +%s) - $(stat -c %Y "$STAGING" 2>/dev/null || echo 0) )) -gt 300 ]; then
-  rm -f "$STAGING"
-  exit 0
+[ -n "$CLAUDE_SESSION" ] || exit 0
+[ -n "$TRANSCRIPT" ] || exit 0
+
+# Find the canvas session ID for this Claude session
+SESSION_FILE="$DATA_DIR/session-${CLAUDE_SESSION}"
+if [ ! -f "$SESSION_FILE" ]; then
+  SESSION_FILE="$DATA_DIR/session-unknown"
 fi
-
-SESSION_FILE="$DATA_DIR/session-${CLAUDE_CODE_SESSION_ID:-}"
-if [ ! -f "$SESSION_FILE" ]; then rm -f "$STAGING"; exit 0; fi
+if [ ! -f "$SESSION_FILE" ]; then exit 0; fi
 SESSION_ID=$(cat "$SESSION_FILE")
-[ -n "$SESSION_ID" ] || { rm -f "$STAGING"; exit 0; }
+[ -n "$SESSION_ID" ] || exit 0
 
-CONTENT=$(cat "$STAGING")
-rm -f "$STAGING"
+RESULT=$(python3 - "$TRANSCRIPT" <<'PYEOF'
+import json, sys, re
 
-if [ "$CONTENT" = "PUSH_PREV_ASSISTANT" ]; then
-  TRANSCRIPT=$(find ~/.claude/projects -name "${CLAUDE_CODE_SESSION_ID}.jsonl" 2>/dev/null | head -1)
-  [ -n "$TRANSCRIPT" ] || exit 0
-  CONTENT=$(python3 - "$TRANSCRIPT" <<'PYEOF'
-import json, sys
 msgs = []
 with open(sys.argv[1]) as f:
     for line in f:
@@ -41,27 +39,58 @@ def extract_text(content):
         return '\n'.join(p.get('text','') for p in content if isinstance(p,dict) and p.get('type')=='text')
     return ''
 
-# Find last /tui-canvas user message, then get assistant message before it
-tui_idx = None
-for i, m in enumerate(reversed(msgs)):
-    if m.get('type') == 'user':
-        text = extract_text(m.get('message',{}).get('content',''))
-        if text.strip().startswith('/tui-canvas'):
-            tui_idx = len(msgs) - 1 - i
-            break
+# Find the most recent tui-canvas/tui-clear command trigger (has <command-name> tag)
+cmd_idx = None
+is_clear = False
+cmd_args = ''
+for i in range(len(msgs)-1, -1, -1):
+    if msgs[i].get('type') != 'user':
+        continue
+    text = extract_text(msgs[i].get('message',{}).get('content',''))
+    m = re.search(r'<command-name>(/tui-(?:canvas|clear)[^<]*)</command-name>', text)
+    if not m:
+        continue
+    cmd_name = m.group(1)
+    cmd_idx = i
+    is_clear = cmd_name.startswith('/tui-clear')
+    args_m = re.search(r'<command-args>(.*?)</command-args>', text, re.DOTALL)
+    cmd_args = args_m.group(1).strip() if args_m else ''
+    break
 
-if tui_idx is None: sys.exit(0)
+if cmd_idx is None:
+    sys.exit(0)
 
-for m in reversed(msgs[:tui_idx]):
+# Only act if this command is from the current turn.
+# The hook fires before the current assistant response is written to the transcript,
+# so if there's already an assistant message after the command, it was handled before.
+first_asst_after = next((i for i in range(cmd_idx+1, len(msgs)) if msgs[i].get('type')=='assistant'), None)
+if first_asst_after is not None:
+    sys.exit(0)
+
+if is_clear:
+    print('CLEAR_CANVAS')
+    sys.exit(0)
+
+if cmd_args:
+    print(cmd_args)
+    sys.exit(0)
+
+# Push previous assistant response (before the command trigger)
+for m in reversed(msgs[:cmd_idx]):
     if m.get('type') == 'assistant':
         text = extract_text(m.get('message',{}).get('content',''))
         if text.strip():
             print(text.strip())
             break
 PYEOF
-  ) || exit 0
-  [ -n "$CONTENT" ] || exit 0
+) || exit 0
+
+[ -n "$RESULT" ] || exit 0
+
+if [ "$RESULT" = "CLEAR_CANVAS" ]; then
+  tui-canvas clear "$SESSION_ID" 2>/dev/null || true
+else
+  printf '%s' "$RESULT" | tui-canvas append "$SESSION_ID" 2>/dev/null || true
 fi
 
-printf '%s' "$CONTENT" | tui-canvas append "$SESSION_ID" 2>/dev/null || true
 printf '{}\n'

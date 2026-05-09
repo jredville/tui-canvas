@@ -7,10 +7,10 @@ tui-canvas is three cooperating subsystems in a single Go binary: a **daemon**, 
 │  Claude Code session (one per terminal tab)          │
 │                                                      │
 │  SessionStart hook ──registers──► daemon             │
-│                    └──writes──►  session-$ID tempfile│
-│  /tui-canvas skill ──writes──►  pending-$ID staging  │
-│  Stop hook         ──appends──► daemon (via staging) │
-│  /tui-clear skill  ──clears──►  daemon               │
+│                    └──writes──►  session-unknown file │
+│  /tui-canvas skill ──(no-op)──► says "Pushed to canvas."│
+│  Stop hook         ──reads transcript──► appends to daemon│
+│  /tui-clear skill  ──(no-op)──► says "Canvas cleared."│
 └─────────────────────────────────────────────────────┘
                                        │
                               Unix socket (tui.sock)
@@ -103,22 +103,23 @@ The plugin integrates tui-canvas into Claude Code. It has two components: a hook
 **`plugin/hooks/session-start`** — runs at `SessionStart`:
 1. Generates a UUID (via `uuidgen` or Python fallback); reuses existing session for the same CWD
 2. Sends `session_register` to the daemon
-3. Writes the tui-canvas session ID to `~/.local/share/tui-canvas/session-$CLAUDE_CODE_SESSION_ID` (keyed by Claude session ID)
+3. Writes the tui-canvas session ID to `~/.local/share/tui-canvas/session-unknown` (`CLAUDE_CODE_SESSION_ID` is not available in `SessionStart` hooks; the stop hook falls back to this file)
 4. Returns `{}` (no `additionalContext` — session ID stays out of Claude's context)
 
 **`plugin/hooks/stop-push`** — runs at `Stop` (after every turn):
-1. Checks for a staging file `~/.local/share/tui-canvas/pending-$CLAUDE_CODE_SESSION_ID`
-2. If absent, exits immediately (no-op — this is the common case)
-3. If present and fresh (<5 min), reads the session ID from the temp file and calls `tui-canvas append`
-4. If content is the sentinel `PUSH_PREV_ASSISTANT`, parses `~/.claude/projects/*/SESSION_ID.jsonl` to find the previous assistant message before the `/tui-canvas` invocation
+1. Reads the hook event JSON from stdin (provides `session_id` and `transcript_path`)
+2. Looks up the canvas session ID from `session-$CLAUDE_SESSION` (falls back to `session-unknown`)
+3. Scans the transcript backward for the most recent `<command-name>/tui-canvas...` or `<command-name>/tui-clear...` user message
+4. Exits if any assistant message already follows that command (means it was handled in a prior turn — the hook fires before the current response is written to the transcript)
+5. For `/tui-clear`: calls `tui-canvas clear`; for `/tui-canvas`: pushes `<command-args>` verbatim (if present) or the previous assistant response
 
 ### Skills
 
-Both skills run as Haiku (specified via `model:` frontmatter in SKILL.md) to minimise token cost.
+Both skills run as Haiku (specified via `model:` frontmatter in SKILL.md) to minimise token cost. Neither skill makes any tool calls — all work happens in the stop hook.
 
-**`/tui-canvas`** — writes content to the staging file `pending-$CLAUDE_CODE_SESSION_ID` (one `tee` heredoc call). The `stop-push` hook performs the actual daemon append after the turn. For bare `/tui-canvas` with no arguments, writes the sentinel `PUSH_PREV_ASSISTANT` so the stop hook pushes the previous assistant turn.
+**`/tui-canvas`** — says exactly "Pushed to canvas." The stop hook detects the invocation from the transcript and performs the push automatically after the turn.
 
-**`/tui-clear`** — reads the session ID from `session-$CLAUDE_CODE_SESSION_ID` (fast file read, no socket call) and calls `tui-canvas clear <id>`. Falls back to `tui-canvas list --cwd` if the temp file is missing.
+**`/tui-clear`** — says exactly "Canvas cleared." The stop hook detects the invocation and performs the clear automatically.
 
 ---
 
