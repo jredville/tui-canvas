@@ -1,0 +1,140 @@
+// Command tui-canvas is a three-in-one binary:
+//
+//	tui-canvas          — TUI client (auto-starts daemon if not running)
+//	tui-canvas daemon   — background state server
+//	tui-canvas send     — reads JSON from stdin, writes to socket
+package main
+
+import (
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"tui-canvas/internal/daemon"
+	"tui-canvas/internal/protocol"
+	"tui-canvas/internal/tui"
+)
+
+func main() {
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "daemon":
+			daemon.Run()
+			return
+		case "send":
+			runSend()
+			return
+		case "--help", "-h", "help":
+			printUsage()
+			return
+		}
+	}
+	runTUI()
+}
+
+func printUsage() {
+	fmt.Fprintln(os.Stderr, `tui-canvas — persistent canvas display panel for Claude sessions
+
+Usage:
+  tui-canvas           Start the TUI client (auto-starts daemon)
+  tui-canvas daemon    Run the background state server
+  tui-canvas send      Read JSON from stdin and write to socket
+  tui-canvas help      Show this help message`)
+}
+
+// isDaemonRunning returns true when the socket exists and accepts connections.
+func isDaemonRunning() bool {
+	conn, err := net.DialTimeout("unix", protocol.SocketPath(), 200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+// runTUI starts the daemon if needed, connects, subscribes, and runs the TUI.
+func runTUI() {
+	if !isDaemonRunning() {
+		// Launch daemon as a detached background process.
+		cmd := exec.Command(os.Args[0], "daemon")
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "tui-canvas: failed to start daemon: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Poll until the socket is ready (up to 1 s).
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if isDaemonRunning() {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
+	conn, err := net.DialTimeout("unix", protocol.SocketPath(), time.Second)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tui-canvas: cannot connect to daemon: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Send subscribe message.
+	sub := protocol.Subscribe{Type: "subscribe"}
+	b, err := protocol.Encode(sub)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tui-canvas: encode subscribe: %v\n", err)
+		os.Exit(1)
+	}
+	if _, err := conn.Write(b); err != nil {
+		fmt.Fprintf(os.Stderr, "tui-canvas: write subscribe: %v\n", err)
+		os.Exit(1)
+	}
+
+	model, err := tui.New(conn)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tui-canvas: init TUI: %v\n", err)
+		os.Exit(1)
+	}
+
+	p := tea.NewProgram(model, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "tui-canvas: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runSend reads a JSON message from stdin and forwards it to the daemon socket.
+// It exits 0 silently if the daemon is not running (plugin must never fail a session).
+func runSend() {
+	if !isDaemonRunning() {
+		return
+	}
+
+	raw, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		// Silent exit – don't fail the Claude session.
+		return
+	}
+
+	// Normalise: ensure exactly one trailing newline.
+	msg := raw
+	for len(msg) > 0 && msg[len(msg)-1] == '\n' {
+		msg = msg[:len(msg)-1]
+	}
+	msg = append(msg, '\n')
+
+	conn, err := net.DialTimeout("unix", protocol.SocketPath(), time.Second)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	_, _ = conn.Write(msg)
+}

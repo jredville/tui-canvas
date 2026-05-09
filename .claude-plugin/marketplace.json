@@ -1,0 +1,14 @@
+{
+  "name": "tui-canvas",
+  "plugins": [
+    {
+      "name": "tui-canvas",
+      "source": "./plugin",
+      "description": "Persistent canvas display panel for Claude sessions",
+      "version": "1.0.0"
+    }
+  ],
+  "owner": {
+    "name": "jredville"
+  }
+}

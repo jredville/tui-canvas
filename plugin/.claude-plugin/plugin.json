@@ -1,0 +1,7 @@
+{
+  "name": "tui-canvas",
+  "version": "1.0.0",
+  "description": "Persistent canvas display panel for Claude sessions",
+  "hooks": "./hooks/hooks.json",
+  "skills": "./skills"
+}

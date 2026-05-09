@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SESSION_ID=$(uuidgen 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())")
+NAME=$(basename "$(pwd)")
+SOCKET="$HOME/.local/share/tui-canvas/tui.sock"
+
+if [ -S "$SOCKET" ]; then
+  printf '{"type":"session_register","session_id":"%s","name":"%s","cwd":"%s"}\n' \
+    "$SESSION_ID" "$NAME" "$(pwd)" | tui-canvas send 2>/dev/null || true
+fi
+
+printf '{"hookSpecificOutput":{"additionalContext":"[tui-canvas] Your session ID is: %s"}}\n' "$SESSION_ID"
