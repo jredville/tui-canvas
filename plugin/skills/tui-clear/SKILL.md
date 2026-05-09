@@ -6,7 +6,7 @@ Clear the canvas for the current session.
 
 1. Find the session ID using the first method that succeeds:
    - **a)** Look for `[tui-canvas] Your session ID is: <UUID>` in your context. Extract the UUID.
-   - **b)** Run `tui-canvas list --cwd "$(pwd)"` and use the first session ID from the output (tab-separated: `id\tname\tcwd`).
+   - **b)** Run `tui-canvas list --cwd "$(pwd)"` and use the **last** session ID from the output — it is the most recently registered session. Extract with: `tui-canvas list --cwd "$(pwd)" | tail -1 | cut -f1`
    - **c)** If neither works, tell the user the canvas is not available and suggest pressing `?` in the TUI to reveal session IDs.
 
 2. Send the clear message:
