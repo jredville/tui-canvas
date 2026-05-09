@@ -78,11 +78,14 @@ func (m *Model) tabBar() string {
 
 // helpBar renders the single-line keybinding hint at the bottom.
 func (m *Model) helpBar() string {
+	if m.confirming && len(m.sessions) > 0 {
+		return helpStyle.Render(fmt.Sprintf("Kill \"%s\"?  x: confirm  any key: cancel", m.sessions[m.activeTab].Name))
+	}
 	if m.debug && len(m.sessions) > 0 {
 		id := m.sessions[m.activeTab].ID
-		return helpStyle.Render(fmt.Sprintf("session id: %s  │  ?: hide  tab/shift+tab: switch  ↑↓/jk: scroll  R: restart  q: quit", id))
+		return helpStyle.Render(fmt.Sprintf("session id: %s  │  ?: hide  tab/shift+tab: switch  ↑↓/jk: scroll  x: kill tab  R: restart  q: quit", id))
 	}
-	return helpStyle.Render("tab/shift+tab: switch  ↑↓/jk: scroll  ?: session id  R: restart  q: quit")
+	return helpStyle.Render("tab/shift+tab: switch  ↑↓/jk: scroll  x: kill tab  ?: session id  R: restart  q: quit")
 }
 
 // renderCanvas builds the scrollable content string for the active session.

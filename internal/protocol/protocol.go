@@ -97,6 +97,18 @@ type CanvasCleared struct {
 	SessionID string `json:"session_id"`
 }
 
+// SessionRemove asks the daemon to remove a session and all its canvas entries.
+type SessionRemove struct {
+	Type      string `json:"type"` // "session_remove"
+	SessionID string `json:"session_id"`
+}
+
+// SessionRemoved is broadcast when a session is removed.
+type SessionRemoved struct {
+	Type      string `json:"type"` // "session_removed"
+	SessionID string `json:"session_id"`
+}
+
 // DaemonRestart is sent one-shot to ask the daemon to restart.
 type DaemonRestart struct {
 	Type string `json:"type"` // "daemon_restart"

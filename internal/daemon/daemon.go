@@ -323,6 +323,28 @@ func handlePluginMessage(msgType string, raw []byte, conn net.Conn, st *state, b
 			bc.broadcast(b)
 		}
 
+	case "session_remove":
+		var msg protocol.SessionRemove
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			return
+		}
+
+		st.mu.Lock()
+		for i, s := range st.sessions {
+			if s.ID == msg.SessionID {
+				st.sessions = append(st.sessions[:i], st.sessions[i+1:]...)
+				delete(st.nextIdx, msg.SessionID)
+				break
+			}
+		}
+		st.mu.Unlock()
+		saveSessions(st)
+
+		out := protocol.SessionRemoved{Type: "session_removed", SessionID: msg.SessionID}
+		if b, err := protocol.Encode(out); err == nil {
+			bc.broadcast(b)
+		}
+
 	case "daemon_restart":
 		if b, err := protocol.Encode(protocol.DaemonRestarting{Type: "daemon_restarting"}); err == nil {
 			bc.broadcast(b)

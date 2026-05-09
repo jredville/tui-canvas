@@ -50,6 +50,7 @@ type Model struct {
 	height       int
 	connGen      int   // incremented on each successful reconnect
 	reconnecting bool  // true while attempting to reconnect
+	confirming   bool  // true when waiting for second x to confirm kill
 	tabWidths    []int // rendered width of each tab, set by tabBar()
 }
 
@@ -184,12 +185,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.confirming {
+			m.confirming = false
+			if msg.String() == "x" && len(m.sessions) > 0 {
+				return m, sendSessionRemoveCmd(m.sessions[m.activeTab].ID)
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 
 		case "?":
 			m.debug = !m.debug
+			return m, nil
+
+		case "x":
+			if len(m.sessions) > 0 {
+				m.confirming = true
+			}
 			return m, nil
 
 		case "R":
@@ -280,6 +295,22 @@ func (m *Model) handleSocketMsg(raw []byte) {
 			}
 		}
 		m.refreshViewport()
+
+	case "session_removed":
+		var msg protocol.SessionRemoved
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			return
+		}
+		for i, s := range m.sessions {
+			if s.ID == msg.SessionID {
+				m.sessions = append(m.sessions[:i], m.sessions[i+1:]...)
+				if m.activeTab >= len(m.sessions) && m.activeTab > 0 {
+					m.activeTab = len(m.sessions) - 1
+				}
+				break
+			}
+		}
+		m.refreshViewport()
 	}
 }
 
@@ -322,6 +353,20 @@ func reconnectCmd(attempt int) tea.Cmd {
 			return reconnectRetryMsg{attempt: attempt + 1}
 		}
 		return reconnectedMsg{conn: conn}
+	}
+}
+
+// sendSessionRemoveCmd asks the daemon to remove a session and its canvas entries.
+func sendSessionRemoveCmd(sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		conn, err := net.DialTimeout("unix", protocol.SocketPath(), time.Second)
+		if err != nil {
+			return nil
+		}
+		b, _ := protocol.Encode(protocol.SessionRemove{Type: "session_remove", SessionID: sessionID})
+		conn.Write(b)
+		conn.Close()
+		return nil
 	}
 }
 
