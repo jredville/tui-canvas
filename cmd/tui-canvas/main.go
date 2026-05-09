@@ -1,8 +1,10 @@
 // Command tui-canvas is a three-in-one binary:
 //
-//	tui-canvas          — TUI client (auto-starts daemon if not running)
-//	tui-canvas daemon   — background state server
-//	tui-canvas send     — reads JSON from stdin, writes to socket
+//	tui-canvas                   — TUI client (auto-starts daemon if not running)
+//	tui-canvas daemon            — background state server
+//	tui-canvas send              — reads JSON from stdin, writes to socket
+//	tui-canvas append <id>       — reads content from stdin, appends to session canvas
+//	tui-canvas clear <id>        — clears a session canvas
 package main
 
 import (
@@ -37,6 +39,12 @@ func main() {
 		case "list":
 			runList()
 			return
+		case "append":
+			runAppend()
+			return
+		case "clear":
+			runClear()
+			return
 		case "restart":
 			runRestart()
 			return
@@ -57,7 +65,9 @@ func printUsage() {
 Usage:
   tui-canvas                  Start the TUI client (auto-starts daemon)
   tui-canvas daemon           Run the background state server
-  tui-canvas send             Read JSON from stdin and write to socket
+  tui-canvas append <id>      Read markdown from stdin and append to session canvas
+  tui-canvas clear <id>       Clear a session canvas
+  tui-canvas send             Read raw JSON from stdin and write to socket
   tui-canvas list [--cwd DIR] List registered sessions (tab-separated: id name cwd)
   tui-canvas restart          Restart the background daemon (TUIs reconnect automatically)
   tui-canvas version          Print the version string
@@ -163,6 +173,58 @@ func runList() {
 	for _, s := range resp.Sessions {
 		fmt.Printf("%s\t%s\t%s\n", s.ID, s.Name, s.CWD)
 	}
+}
+
+// runAppend reads content from stdin and appends it to the named session's canvas.
+func runAppend() {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: tui-canvas append <session-id>")
+		os.Exit(1)
+	}
+	sessionID := os.Args[2]
+	content, err := io.ReadAll(os.Stdin)
+	if err != nil || !protocol.IsDaemonRunning() {
+		return
+	}
+	msg, err := protocol.Encode(protocol.CanvasAppend{
+		Type:      "canvas_append",
+		SessionID: sessionID,
+		Content:   string(content),
+	})
+	if err != nil {
+		return
+	}
+	conn, err := net.DialTimeout("unix", protocol.SocketPath(), time.Second)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	_, _ = conn.Write(msg)
+}
+
+// runClear clears the canvas for the named session.
+func runClear() {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: tui-canvas clear <session-id>")
+		os.Exit(1)
+	}
+	sessionID := os.Args[2]
+	if !protocol.IsDaemonRunning() {
+		return
+	}
+	msg, err := protocol.Encode(protocol.CanvasClear{
+		Type:      "canvas_clear",
+		SessionID: sessionID,
+	})
+	if err != nil {
+		return
+	}
+	conn, err := net.DialTimeout("unix", protocol.SocketPath(), time.Second)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	_, _ = conn.Write(msg)
 }
 
 // runSend reads a JSON message from stdin and forwards it to the daemon socket.

@@ -1,3 +1,7 @@
+---
+model: claude-haiku-4-5-20251001
+---
+
 # /tui-canvas
 
 Send content to the tui-canvas display panel.
@@ -11,15 +15,12 @@ Send content to the tui-canvas display panel.
 
 2. If the user provided text after `/tui-canvas`, use that as the content. Otherwise, use the previous assistant response.
 
-3. Send to canvas using Python for safe JSON encoding:
+3. Send to canvas:
 
 ```bash
-python3 -c "
-import json, subprocess
-content = '''CONTENT_HERE'''
-msg = json.dumps({'type': 'canvas_append', 'session_id': 'SESSION_ID_HERE', 'content': content})
-subprocess.run(['tui-canvas', 'send'], input=msg.encode())
-"
+tui-canvas append SESSION_ID_HERE <<'EOF'
+CONTENT_HERE
+EOF
 ```
 
 4. Confirm to the user: "Sent to canvas."

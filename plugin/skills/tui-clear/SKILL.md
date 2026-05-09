@@ -1,3 +1,7 @@
+---
+model: claude-haiku-4-5-20251001
+---
+
 # /tui-clear
 
 Clear the canvas for the current session.
@@ -12,11 +16,7 @@ Clear the canvas for the current session.
 2. Send the clear message:
 
 ```bash
-python3 -c "
-import json, subprocess
-msg = json.dumps({'type': 'canvas_clear', 'session_id': 'SESSION_ID_HERE'})
-subprocess.run(['tui-canvas', 'send'], input=msg.encode())
-"
+tui-canvas clear SESSION_ID_HERE
 ```
 
 3. Confirm to the user: "Canvas cleared."
