@@ -28,6 +28,9 @@ var (
 
 // View renders the full TUI layout: tab bar, viewport, help bar.
 func (m *Model) View() string {
+	if m.reconnecting {
+		return "Reconnecting to daemon…\n"
+	}
 	if m.err != nil {
 		return fmt.Sprintf("Connection error: %v\n", m.err)
 	}
@@ -44,9 +47,10 @@ func (m *Model) View() string {
 	return sb.String()
 }
 
-// tabBar renders the horizontal tab strip.
+// tabBar renders the horizontal tab strip and records each tab's width for click hit-testing.
 func (m *Model) tabBar() string {
 	if len(m.sessions) == 0 {
+		m.tabWidths = nil
 		return inactiveTabStyle.Render("no sessions")
 	}
 	tabs := make([]string, len(m.sessions))
@@ -65,6 +69,10 @@ func (m *Model) tabBar() string {
 			tabs[i] = inactiveTabStyle.Render(label)
 		}
 	}
+	m.tabWidths = make([]int, len(tabs))
+	for i, t := range tabs {
+		m.tabWidths[i] = lipgloss.Width(t)
+	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
 }
 
@@ -72,9 +80,9 @@ func (m *Model) tabBar() string {
 func (m *Model) helpBar() string {
 	if m.debug && len(m.sessions) > 0 {
 		id := m.sessions[m.activeTab].ID
-		return helpStyle.Render(fmt.Sprintf("session id: %s  │  ?: hide  tab/shift+tab: switch  ↑↓/jk: scroll  q: quit", id))
+		return helpStyle.Render(fmt.Sprintf("session id: %s  │  ?: hide  tab/shift+tab: switch  ↑↓/jk: scroll  R: restart  q: quit", id))
 	}
-	return helpStyle.Render("tab/shift+tab: switch  ↑↓/jk: scroll  ?: session id  q: quit")
+	return helpStyle.Render("tab/shift+tab: switch  ↑↓/jk: scroll  ?: session id  R: restart  q: quit")
 }
 
 // renderCanvas builds the scrollable content string for the active session.

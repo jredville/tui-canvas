@@ -22,6 +22,9 @@ import (
 	"tui-canvas/internal/tui"
 )
 
+// Version is set at build time via -ldflags "-X main.Version=vX.Y.Z".
+var Version = "dev"
+
 func main() {
 	if len(os.Args) >= 2 {
 		switch os.Args[1] {
@@ -33,6 +36,12 @@ func main() {
 			return
 		case "list":
 			runList()
+			return
+		case "restart":
+			runRestart()
+			return
+		case "version":
+			fmt.Println(Version)
 			return
 		case "--help", "-h", "help":
 			printUsage()
@@ -50,22 +59,14 @@ Usage:
   tui-canvas daemon           Run the background state server
   tui-canvas send             Read JSON from stdin and write to socket
   tui-canvas list [--cwd DIR] List registered sessions (tab-separated: id name cwd)
+  tui-canvas restart          Restart the background daemon (TUIs reconnect automatically)
+  tui-canvas version          Print the version string
   tui-canvas help             Show this help message`)
-}
-
-// isDaemonRunning returns true when the socket exists and accepts connections.
-func isDaemonRunning() bool {
-	conn, err := net.DialTimeout("unix", protocol.SocketPath(), 200*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
 }
 
 // runTUI starts the daemon if needed, connects, subscribes, and runs the TUI.
 func runTUI() {
-	if !isDaemonRunning() {
+	if !protocol.IsDaemonRunning() {
 		// Launch daemon as a detached background process.
 		cmd := exec.Command(os.Args[0], "daemon")
 		cmd.Stdout = nil
@@ -78,7 +79,7 @@ func runTUI() {
 		// Poll until the socket is ready (up to 1 s).
 		deadline := time.Now().Add(time.Second)
 		for time.Now().Before(deadline) {
-			if isDaemonRunning() {
+			if protocol.IsDaemonRunning() {
 				break
 			}
 			time.Sleep(50 * time.Millisecond)
@@ -109,7 +110,7 @@ func runTUI() {
 		os.Exit(1)
 	}
 
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "tui-canvas: %v\n", err)
 		os.Exit(1)
@@ -120,7 +121,7 @@ func runTUI() {
 // one per line, tab-separated: session_id<TAB>name<TAB>cwd.
 // Pass --cwd <dir> to filter by working directory.
 func runList() {
-	if !isDaemonRunning() {
+	if !protocol.IsDaemonRunning() {
 		return
 	}
 
@@ -167,7 +168,7 @@ func runList() {
 // runSend reads a JSON message from stdin and forwards it to the daemon socket.
 // It exits 0 silently if the daemon is not running (plugin must never fail a session).
 func runSend() {
-	if !isDaemonRunning() {
+	if !protocol.IsDaemonRunning() {
 		return
 	}
 
@@ -191,4 +192,21 @@ func runSend() {
 	defer conn.Close()
 
 	_, _ = conn.Write(msg)
+}
+
+// runRestart asks the daemon to restart itself. Connected TUIs will
+// automatically reconnect via their built-in reconnect state machine.
+func runRestart() {
+	if !protocol.IsDaemonRunning() {
+		fmt.Fprintln(os.Stderr, "tui-canvas: daemon is not running")
+		return
+	}
+	conn, err := net.DialTimeout("unix", protocol.SocketPath(), time.Second)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tui-canvas: %v\n", err)
+		return
+	}
+	defer conn.Close()
+	b, _ := protocol.Encode(protocol.DaemonRestart{Type: "daemon_restart"})
+	_, _ = conn.Write(b)
 }

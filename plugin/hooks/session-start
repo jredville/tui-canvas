@@ -1,6 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Auto-install or upgrade the tui-canvas binary if the plugin version has changed.
+PLUGIN_VERSION=$(cat "${CLAUDE_PLUGIN_ROOT}/VERSION" 2>/dev/null || echo "")
+INSTALL_PATH="${HOME}/.local/bin/tui-canvas"
+INSTALLED_VERSION=$(tui-canvas version 2>/dev/null || echo "")
+
+if [ -n "$PLUGIN_VERSION" ] && [ "$INSTALLED_VERSION" != "$PLUGIN_VERSION" ]; then
+  OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+  ARCH=$(uname -m)
+  case "$ARCH" in
+    x86_64)            ARCH="amd64" ;;
+    aarch64 | arm64)   ARCH="arm64" ;;
+  esac
+  URL="https://github.com/jredville/tui-canvas/releases/download/${PLUGIN_VERSION}/tui-canvas-${OS}-${ARCH}"
+  mkdir -p "${HOME}/.local/bin"
+  if curl -fsSL "$URL" -o "${INSTALL_PATH}.tmp" 2>/dev/null; then
+    chmod +x "${INSTALL_PATH}.tmp"
+    mv "${INSTALL_PATH}.tmp" "$INSTALL_PATH"
+  fi
+fi
+
 SESSION_ID=$(uuidgen 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())")
 NAME=$(basename "$(pwd)")
 SOCKET="$HOME/.local/share/tui-canvas/tui.sock"

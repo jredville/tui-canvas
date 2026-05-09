@@ -2,8 +2,10 @@ package protocol
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Envelope is used for type-peeking before full decode.
@@ -95,6 +97,16 @@ type CanvasCleared struct {
 	SessionID string `json:"session_id"`
 }
 
+// DaemonRestart is sent one-shot to ask the daemon to restart.
+type DaemonRestart struct {
+	Type string `json:"type"` // "daemon_restart"
+}
+
+// DaemonRestarting is broadcast to subscribers before the daemon exits.
+type DaemonRestarting struct {
+	Type string `json:"type"` // "daemon_restarting"
+}
+
 // SocketPath returns the Unix socket path, respecting XDG_DATA_HOME.
 func SocketPath() string {
 	base := os.Getenv("XDG_DATA_HOME")
@@ -102,6 +114,16 @@ func SocketPath() string {
 		base = filepath.Join(os.Getenv("HOME"), ".local", "share")
 	}
 	return filepath.Join(base, "tui-canvas", "tui.sock")
+}
+
+// IsDaemonRunning returns true when the socket exists and accepts connections.
+func IsDaemonRunning() bool {
+	conn, err := net.DialTimeout("unix", SocketPath(), 200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 // Encode marshals v to JSON and appends a newline delimiter.

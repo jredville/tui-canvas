@@ -38,23 +38,9 @@ Claude plugin (SessionStart hook)
 
 ## Installation
 
-### 1. Build the binary
+### 1. Install the Claude Code plugin
 
-Requires Go 1.24+.
-
-```bash
-git clone https://github.com/jredville/tui-canvas
-cd tui-canvas
-go build ./cmd/tui-canvas/
-```
-
-Place the binary somewhere on your `$PATH`:
-
-```bash
-ln -sf "$PWD/tui-canvas" ~/.local/bin/tui-canvas
-```
-
-### 2. Install the Claude Code plugin
+The binary downloads automatically on your first session start (requires `curl` and internet access). Supported platforms: Linux (amd64, arm64), macOS (amd64, arm64).
 
 Add to `~/.claude/settings.json`:
 
@@ -139,3 +125,12 @@ Newline-delimited JSON over a Unix socket at `~/.local/share/tui-canvas/tui.sock
 | `tab` / `shift+tab` | Switch sessions |
 | `↑` / `↓` / `j` / `k` | Scroll |
 | `q` / `ctrl+c` | Quit |
+
+## Releasing a new version
+
+```bash
+make release VERSION=vX.Y.Z
+git add plugin/VERSION && git commit -m "release vX.Y.Z" && git push
+```
+
+`make release` cross-compiles for all platforms, creates the GitHub release with the binaries attached, and writes `plugin/VERSION`. On the next session start, Claude Code users will automatically download the new binary.

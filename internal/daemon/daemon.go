@@ -158,13 +158,13 @@ func Run() {
 			// Listener was closed (e.g. signal handler fired).
 			return
 		}
-		go handleConn(conn, st, bc)
+		go handleConn(conn, st, bc, ln)
 	}
 }
 
 // handleConn reads the first line from conn to determine whether this is a
 // long-lived subscriber or a one-shot plugin message.
-func handleConn(conn net.Conn, st *state, bc *broadcaster) {
+func handleConn(conn net.Conn, st *state, bc *broadcaster, ln net.Listener) {
 	reader := bufio.NewReader(conn)
 	line, err := reader.ReadBytes('\n')
 	if err != nil {
@@ -182,7 +182,7 @@ func handleConn(conn net.Conn, st *state, bc *broadcaster) {
 	case "subscribe":
 		handleSubscriber(conn, reader, st, bc)
 	default:
-		handlePluginMessage(env.Type, line, conn, st, bc)
+		handlePluginMessage(env.Type, line, conn, st, bc, ln)
 		conn.Close()
 	}
 }
@@ -235,7 +235,7 @@ func handleSubscriber(conn net.Conn, _ *bufio.Reader, st *state, bc *broadcaster
 }
 
 // handlePluginMessage processes a one-shot message from the plugin.
-func handlePluginMessage(msgType string, raw []byte, conn net.Conn, st *state, bc *broadcaster) {
+func handlePluginMessage(msgType string, raw []byte, conn net.Conn, st *state, bc *broadcaster, ln net.Listener) {
 	switch msgType {
 	case "session_register":
 		var msg protocol.SessionRegister
@@ -322,6 +322,12 @@ func handlePluginMessage(msgType string, raw []byte, conn net.Conn, st *state, b
 		if b, err := protocol.Encode(out); err == nil {
 			bc.broadcast(b)
 		}
+
+	case "daemon_restart":
+		if b, err := protocol.Encode(protocol.DaemonRestarting{Type: "daemon_restarting"}); err == nil {
+			bc.broadcast(b)
+		}
+		ln.Close()
 
 	case "list_sessions":
 		var msg protocol.ListSessions

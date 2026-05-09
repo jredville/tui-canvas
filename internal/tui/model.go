@@ -4,7 +4,11 @@ package tui
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"net"
+	"os"
+	"os/exec"
+	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -14,23 +18,39 @@ import (
 )
 
 // socketMsg carries a raw newline-delimited JSON line from the daemon.
-type socketMsg []byte
+// gen tracks which connection the message came from, so stale messages from
+// a dead connection can be ignored after a reconnect.
+type socketMsg struct {
+	data []byte
+	gen  int
+}
 
 // socketErrMsg carries a read error from the socket goroutine.
-type socketErrMsg error
+type socketErrMsg struct {
+	err error
+	gen int
+}
+
+type reconnectedMsg struct{ conn net.Conn }
+type reconnectRetryMsg struct{ attempt int }
+type reconnectFailedMsg struct{ err error }
+type restartSentMsg struct{}
 
 // Model is the bubbletea model for the TUI client.
 type Model struct {
-	sessions  []protocol.Session
-	activeTab int
-	viewport  viewport.Model
-	ch        chan tea.Msg
-	renderer  *glamour.TermRenderer
-	ready     bool
-	debug     bool
-	err       error
-	width     int
-	height    int
+	sessions     []protocol.Session
+	activeTab    int
+	viewport     viewport.Model
+	ch           chan tea.Msg
+	renderer     *glamour.TermRenderer
+	ready        bool
+	debug        bool
+	err          error
+	width        int
+	height       int
+	connGen      int   // incremented on each successful reconnect
+	reconnecting bool  // true while attempting to reconnect
+	tabWidths    []int // rendered width of each tab, set by tabBar()
 }
 
 // New creates a Model and starts the background socket reader goroutine.
@@ -52,14 +72,15 @@ func New(conn net.Conn) (*Model, error) {
 
 	// Single goroutine owns the bufio.Reader; sends lines (or errors) to ch.
 	go func() {
+		const myGen = 0
 		reader := bufio.NewReader(conn)
 		for {
 			line, err := reader.ReadBytes('\n')
 			if err != nil {
-				ch <- socketErrMsg(err)
+				ch <- socketErrMsg{err, myGen}
 				return
 			}
-			ch <- socketMsg(line)
+			ch <- socketMsg{line, myGen}
 		}
 	}()
 
@@ -95,11 +116,71 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case socketMsg:
-		m.handleSocketMsg(msg)
+		if msg.gen != m.connGen {
+			// Stale message from an old connection — drain but ignore.
+			return m, waitForMsg(m.ch)
+		}
+		var env protocol.Envelope
+		if json.Unmarshal(msg.data, &env) == nil && env.Type == "daemon_restarting" {
+			if !m.reconnecting {
+				m.reconnecting = true
+				// No waitForMsg: the goroutine will send socketErrMsg next;
+				// reconnectedMsg handler re-establishes the consumer.
+				return m, reconnectCmd(0)
+			}
+			return m, waitForMsg(m.ch)
+		}
+		if !m.reconnecting {
+			m.handleSocketMsg(msg.data)
+		}
 		return m, waitForMsg(m.ch)
 
 	case socketErrMsg:
-		m.err = msg
+		if msg.gen != m.connGen {
+			// Stale error from an old connection — drain but ignore.
+			return m, waitForMsg(m.ch)
+		}
+		if !m.reconnecting {
+			m.reconnecting = true
+			return m, reconnectCmd(0)
+		}
+		// Already reconnecting (e.g. R was pressed); reader goroutine is dead,
+		// reconnectCmd is in flight — don't add another waiter.
+		return m, nil
+
+	case reconnectedMsg:
+		m.connGen++
+		myGen := m.connGen
+		m.reconnecting = false
+		m.err = nil
+		go func() {
+			reader := bufio.NewReader(msg.conn)
+			for {
+				line, err := reader.ReadBytes('\n')
+				if err != nil {
+					m.ch <- socketErrMsg{err, myGen}
+					return
+				}
+				m.ch <- socketMsg{line, myGen}
+			}
+		}()
+		return m, waitForMsg(m.ch)
+
+	case reconnectRetryMsg:
+		return m, reconnectCmd(msg.attempt)
+
+	case reconnectFailedMsg:
+		m.reconnecting = false
+		m.err = msg.err
+		return m, nil
+
+	case restartSentMsg:
+		return m, nil
+
+	case tea.MouseMsg:
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			m.handleTabClick(msg.X, msg.Y)
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -109,6 +190,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "?":
 			m.debug = !m.debug
+			return m, nil
+
+		case "R":
+			if !m.reconnecting {
+				m.reconnecting = true
+				// attempt=2 → 200 ms initial delay, giving the daemon time to exit.
+				return m, tea.Batch(sendDaemonRestartCmd(), reconnectCmd(2))
+			}
 			return m, nil
 
 		case "tab":
@@ -194,6 +283,62 @@ func (m *Model) handleSocketMsg(raw []byte) {
 	}
 }
 
+// reconnectCmd attempts to connect to the daemon, starting it if needed.
+// attempt drives exponential backoff; attempt=0 tries immediately.
+func reconnectCmd(attempt int) tea.Cmd {
+	return func() tea.Msg {
+		const maxAttempts = 8
+		if attempt >= maxAttempts {
+			return reconnectFailedMsg{
+				err: fmt.Errorf("daemon did not come back after %d attempts", attempt),
+			}
+		}
+		if attempt > 0 {
+			delay := time.Duration(100<<uint(attempt-1)) * time.Millisecond
+			if delay > 2*time.Second {
+				delay = 2 * time.Second
+			}
+			time.Sleep(delay)
+		}
+		if !protocol.IsDaemonRunning() {
+			exe, _ := os.Executable()
+			cmd := exec.Command(exe, "daemon")
+			_ = cmd.Start()
+			deadline := time.Now().Add(time.Second)
+			for time.Now().Before(deadline) {
+				if protocol.IsDaemonRunning() {
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+		conn, err := net.DialTimeout("unix", protocol.SocketPath(), time.Second)
+		if err != nil {
+			return reconnectRetryMsg{attempt: attempt + 1}
+		}
+		b, _ := protocol.Encode(protocol.Subscribe{Type: "subscribe"})
+		if _, err := conn.Write(b); err != nil {
+			conn.Close()
+			return reconnectRetryMsg{attempt: attempt + 1}
+		}
+		return reconnectedMsg{conn: conn}
+	}
+}
+
+// sendDaemonRestartCmd asks the daemon to restart itself.
+func sendDaemonRestartCmd() tea.Cmd {
+	return func() tea.Msg {
+		conn, err := net.DialTimeout("unix", protocol.SocketPath(), time.Second)
+		if err != nil {
+			return restartSentMsg{}
+		}
+		b, _ := protocol.Encode(protocol.DaemonRestart{Type: "daemon_restart"})
+		conn.Write(b)
+		conn.Close()
+		return restartSentMsg{}
+	}
+}
+
 // contentHeight computes the viewport height given the current terminal size.
 func (m *Model) contentHeight() int {
 	const tabBarHeight = 3
@@ -203,6 +348,20 @@ func (m *Model) contentHeight() int {
 		return 1
 	}
 	return h
+}
+
+// handleTabClick switches to the tab whose rendered width contains column x.
+// The tab bar occupies the top rows; y is ignored.
+func (m *Model) handleTabClick(x, _ int) {
+	cursor := 0
+	for i, w := range m.tabWidths {
+		if x < cursor+w {
+			m.activeTab = i
+			m.refreshViewport()
+			return
+		}
+		cursor += w
+	}
 }
 
 // refreshViewport re-renders the canvas into the viewport. Only called when
