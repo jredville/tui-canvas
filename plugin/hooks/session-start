@@ -21,13 +21,26 @@ if [ -n "$PLUGIN_VERSION" ] && [ "$INSTALLED_VERSION" != "$PLUGIN_VERSION" ]; th
   fi
 fi
 
-SESSION_ID=$(uuidgen 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())")
 NAME=$(basename "$(pwd)")
 SOCKET="$HOME/.local/share/tui-canvas/tui.sock"
+
+# Reuse the existing session for this cwd if one exists (e.g. after /clear).
+SESSION_ID=""
+EXISTING_SESSION=false
+if [ -S "$SOCKET" ]; then
+  SESSION_ID=$(tui-canvas list --cwd "$(pwd)" 2>/dev/null | tail -1 | cut -f1)
+  [ -n "$SESSION_ID" ] && EXISTING_SESSION=true
+fi
+if [ -z "$SESSION_ID" ]; then
+  SESSION_ID=$(uuidgen 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())")
+fi
 
 if [ -S "$SOCKET" ]; then
   printf '{"type":"session_register","session_id":"%s","name":"%s","cwd":"%s"}\n' \
     "$SESSION_ID" "$NAME" "$(pwd)" | tui-canvas send 2>/dev/null || true
+  if [ "$EXISTING_SESSION" = true ]; then
+    tui-canvas clear "$SESSION_ID" 2>/dev/null || true
+  fi
 fi
 
 printf '{"hookSpecificOutput":{"additionalContext":"[tui-canvas] Your session ID is: %s"}}\n' "$SESSION_ID"
