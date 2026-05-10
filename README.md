@@ -12,18 +12,17 @@ tui-canvas is three things in one binary:
 - **TUI client** — a bubbletea terminal UI that subscribes to the daemon and renders content. Multiple instances (e.g. in tmux split panes) all show the same live state.
 - **Claude Code plugin** — hooks and skills that let Claude register sessions and push content without you needing to do anything manually.
 
-```
-Claude plugin (SessionStart hook)
-        │ session_register
-        ▼
-  tui-canvas daemon  ◄── canvas_append / canvas_clear / session_remove
-  (~/.local/share/tui-canvas/tui.sock)
-        │ full_state + broadcast
-        ▼
-  TUI client(s)
+```mermaid
+flowchart TD
+    A[Claude Code session] -->|SessionStart hook\nsession_register| D[tui-canvas daemon\n~/.local/share/tui-canvas/tui.sock]
+    A -->|Stop hook / skill\ncanvas_append| D
+    A -->|tui-canvas:tui-clear skill\ncanvas_clear| D
+    D -->|full_state on subscribe\n+ broadcast| T1[TUI client]
+    D -->|full_state on subscribe\n+ broadcast| T2[TUI client]
+    D -->|full_state on subscribe\n+ broadcast| T3[TUI client ...]
 ```
 
-Each Claude Code session automatically registers itself on start. Claude can then push content at any point using the `/tui-canvas` skill, which the Stop hook also invokes automatically.
+Each Claude Code session automatically registers itself on start. Claude can then push content at any point using the `/tui-canvas:tui-canvas` skill, which the Stop hook also invokes automatically.
 
 ## Installation
 
@@ -50,8 +49,8 @@ This auto-starts the daemon if it isn't already running. Open as many instances 
 
 ### Skills
 
-- **`/tui-canvas`** — pushes the previous assistant response (or any text supplied after the command) to the current session's canvas
-- **`/tui-clear`** — clears the canvas for the current session
+- **`/tui-canvas:tui-canvas`** — pushes the previous assistant response (or any text supplied after the command) to the current session's canvas
+- **`/tui-canvas:tui-clear`** — clears the canvas for the current session
 
 Each Claude session gets its own tab, registered automatically when the session starts.
 
