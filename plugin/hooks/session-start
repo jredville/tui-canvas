@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Read event JSON from stdin (SessionStart provides session_id here).
+INPUT=$(cat)
+CLAUDE_CODE_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
+if [[ -z "$CLAUDE_CODE_SESSION_ID" ]]; then
+  CLAUDE_CODE_SESSION_ID=$(printf '%s' "$INPUT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('session_id',''))" 2>/dev/null || echo "")
+fi
+
+# Without a session ID we can't write an unambiguous staging file.
+if [[ -z "$CLAUDE_CODE_SESSION_ID" ]]; then
+  printf '{}\n'
+  exit 0
+fi
+
 # Auto-install or upgrade the tui-canvas binary if the plugin version has changed.
 PLUGIN_VERSION=$(cat "${CLAUDE_PLUGIN_ROOT}/VERSION" 2>/dev/null || echo "")
 INSTALL_PATH="${HOME}/.local/bin/tui-canvas"
@@ -14,10 +27,23 @@ if [ -n "$PLUGIN_VERSION" ] && [ "$INSTALLED_VERSION" != "$PLUGIN_VERSION" ]; th
     aarch64 | arm64)   ARCH="arm64" ;;
   esac
   URL="https://github.com/jredville/tui-canvas/releases/download/${PLUGIN_VERSION}/tui-canvas-${OS}-${ARCH}"
+  SHA_URL="https://github.com/jredville/tui-canvas/releases/download/${PLUGIN_VERSION}/SHA256SUMS"
   mkdir -p "${HOME}/.local/bin"
   if curl -fsSL "$URL" -o "${INSTALL_PATH}.tmp" 2>/dev/null; then
-    chmod +x "${INSTALL_PATH}.tmp"
-    mv "${INSTALL_PATH}.tmp" "$INSTALL_PATH"
+    if curl -fsSL "$SHA_URL" -o "${INSTALL_PATH}.sha256sums" 2>/dev/null; then
+      EXPECTED=$(grep "tui-canvas-${OS}-${ARCH}$" "${INSTALL_PATH}.sha256sums" | awk '{print $1}')
+      ACTUAL=$(sha256sum "${INSTALL_PATH}.tmp" 2>/dev/null | awk '{print $1}')
+      if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
+        rm -f "${INSTALL_PATH}.tmp" "${INSTALL_PATH}.sha256sums"
+        echo "tui-canvas: checksum mismatch — keeping existing binary" >&2
+      else
+        chmod +x "${INSTALL_PATH}.tmp"
+        mv "${INSTALL_PATH}.tmp" "$INSTALL_PATH"
+      fi
+      rm -f "${INSTALL_PATH}.sha256sums"
+    else
+      rm -f "${INSTALL_PATH}.tmp"
+    fi
   fi
 fi
 
@@ -36,14 +62,13 @@ if [ -z "$SESSION_ID" ]; then
 fi
 
 if [ -S "$SOCKET" ]; then
-  printf '{"type":"session_register","session_id":"%s","name":"%s","cwd":"%s"}\n' \
-    "$SESSION_ID" "$NAME" "$(pwd)" | tui-canvas send 2>/dev/null || true
+  tui-canvas register "$SESSION_ID" "$NAME" "$(pwd)" 2>/dev/null || true
   if [ "$EXISTING_SESSION" = true ]; then
     tui-canvas clear "$SESSION_ID" 2>/dev/null || true
   fi
 fi
 
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tui-canvas"
-printf '%s' "$SESSION_ID" > "$DATA_DIR/session-${CLAUDE_CODE_SESSION_ID:-unknown}"
+printf '%s' "$SESSION_ID" > "$DATA_DIR/session-${CLAUDE_CODE_SESSION_ID}"
 
 printf '{}\n'

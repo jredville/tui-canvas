@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -95,6 +96,7 @@ type Model struct {
 	searchHits      []int  // viewport line offsets of matches
 	searchIdx       int    // current hit index
 	renderedContent string // last content passed to viewport, pre-highlight
+	renderedEntries map[string]string // sessionID:index → rendered markdown
 }
 
 // New creates a Model and starts the background socket reader goroutine.
@@ -110,8 +112,9 @@ func New(conn net.Conn) (*Model, error) {
 
 	ch := make(chan tea.Msg, 64)
 	m := &Model{
-		ch:       ch,
-		renderer: renderer,
+		ch:              ch,
+		renderer:        renderer,
+		renderedEntries: make(map[string]string),
 	}
 
 	// Single goroutine owns the bufio.Reader; sends lines (or errors) to ch.
@@ -170,7 +173,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, waitForMsg(m.ch)
 		}
 		var env protocol.Envelope
-		if json.Unmarshal(msg.data, &env) == nil && env.Type == "daemon_restarting" {
+		if json.Unmarshal(msg.data, &env) == nil && env.Type == protocol.TypeDaemonRestarting {
 			if !m.reconnecting {
 				m.reconnecting = true
 				// No waitForMsg: the goroutine will send socketErrMsg next;
@@ -258,6 +261,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.confirming = true
 			}
 		case key.Matches(msg, keys.Restart):
+			if m.err != nil {
+				m.err = nil
+				m.reconnecting = true
+				return m, reconnectCmd(0)
+			}
 			if !m.reconnecting {
 				m.reconnecting = true
 				// attempt=2 → 200 ms initial delay, giving the daemon time to exit.
@@ -297,18 +305,19 @@ func (m *Model) handleSocketMsg(raw []byte) {
 	}
 
 	switch env.Type {
-	case "full_state":
+	case protocol.TypeFullState:
 		var msg protocol.FullState
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			return
 		}
 		m.sessions = msg.Sessions
+		m.renderedEntries = make(map[string]string)
 		if m.activeTab >= len(m.sessions) {
 			m.activeTab = 0
 		}
 		m.refreshViewport()
 
-	case "session_added":
+	case protocol.TypeSessionAdded:
 		var msg protocol.SessionAdded
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			return
@@ -320,7 +329,7 @@ func (m *Model) handleSocketMsg(raw []byte) {
 		})
 		m.refreshViewport()
 
-	case "canvas_appended":
+	case protocol.TypeCanvasAppended:
 		var msg protocol.CanvasAppended
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			return
@@ -333,10 +342,16 @@ func (m *Model) handleSocketMsg(raw []byte) {
 		}
 		m.refreshViewport()
 
-	case "canvas_cleared":
+	case protocol.TypeCanvasCleared:
 		var msg protocol.CanvasCleared
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			return
+		}
+		prefix := msg.SessionID + ":"
+		for k := range m.renderedEntries {
+			if strings.HasPrefix(k, prefix) {
+				delete(m.renderedEntries, k)
+			}
 		}
 		for i := range m.sessions {
 			if m.sessions[i].ID == msg.SessionID {
@@ -346,7 +361,7 @@ func (m *Model) handleSocketMsg(raw []byte) {
 		}
 		m.refreshViewport()
 
-	case "session_removed":
+	case protocol.TypeSessionRemoved:
 		var msg protocol.SessionRemoved
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			return
@@ -362,6 +377,10 @@ func (m *Model) handleSocketMsg(raw []byte) {
 		}
 		m.refreshViewport()
 	}
+}
+
+func (m *Model) renderEntryKey(sessionID string, index int) string {
+	return sessionID + ":" + strconv.Itoa(index)
 }
 
 // reconnectCmd attempts to connect to the daemon, starting it if needed.
@@ -385,6 +404,7 @@ func reconnectCmd(attempt int) tea.Cmd {
 			exe, _ := os.Executable()
 			cmd := exec.Command(exe, "daemon")
 			_ = cmd.Start()
+			go cmd.Wait() //nolint // reap child so it doesn't become a zombie
 			deadline := time.Now().Add(time.Second)
 			for time.Now().Before(deadline) {
 				if protocol.IsDaemonRunning() {
@@ -397,7 +417,7 @@ func reconnectCmd(attempt int) tea.Cmd {
 		if err != nil {
 			return reconnectRetryMsg{attempt: attempt + 1}
 		}
-		b, _ := protocol.Encode(protocol.Subscribe{Type: "subscribe"})
+		b, _ := protocol.Encode(protocol.Subscribe{Type: protocol.TypeSubscribe})
 		if _, err := conn.Write(b); err != nil {
 			conn.Close()
 			return reconnectRetryMsg{attempt: attempt + 1}
@@ -413,7 +433,7 @@ func sendSessionRemoveCmd(sessionID string) tea.Cmd {
 		if err != nil {
 			return nil
 		}
-		b, _ := protocol.Encode(protocol.SessionRemove{Type: "session_remove", SessionID: sessionID})
+		b, _ := protocol.Encode(protocol.SessionRemove{Type: protocol.TypeSessionRemove, SessionID: sessionID})
 		conn.Write(b)
 		conn.Close()
 		return nil
@@ -427,7 +447,7 @@ func sendDaemonRestartCmd() tea.Cmd {
 		if err != nil {
 			return restartSentMsg{}
 		}
-		b, _ := protocol.Encode(protocol.DaemonRestart{Type: "daemon_restart"})
+		b, _ := protocol.Encode(protocol.DaemonRestart{Type: protocol.TypeDaemonRestart})
 		conn.Write(b)
 		conn.Close()
 		return restartSentMsg{}

@@ -15,28 +15,49 @@ TRANSCRIPT=$(printf '%s' "$INPUT" | python3 -c "import json,sys; print(json.load
 
 # Find the canvas session ID for this Claude session
 SESSION_FILE="$DATA_DIR/session-${CLAUDE_SESSION}"
-if [ ! -f "$SESSION_FILE" ]; then
-  SESSION_FILE="$DATA_DIR/session-unknown"
-fi
 if [ ! -f "$SESSION_FILE" ]; then exit 0; fi
 SESSION_ID=$(cat "$SESSION_FILE")
 [ -n "$SESSION_ID" ] || exit 0
 
 RESULT=$(python3 - "$TRANSCRIPT" <<'PYEOF'
-import json, sys, re
+import json, sys, re, os
 
+TRANSCRIPT = sys.argv[1]
+real_transcript = os.path.realpath(TRANSCRIPT) if TRANSCRIPT else ''
+home = os.path.expanduser('~')
+if not real_transcript.startswith(os.path.join(home, '.claude')):
+    sys.exit(0)
+
+TAIL_BYTES = 64 * 1024
 msgs = []
-with open(sys.argv[1]) as f:
-    for line in f:
-        line = line.strip()
-        if line:
-            try: msgs.append(json.loads(line))
-            except: pass
+with open(TRANSCRIPT, 'rb') as f:
+    f.seek(0, 2)
+    size = f.tell()
+    offset = max(0, size - TAIL_BYTES)
+    f.seek(offset)
+    raw = f.read().decode('utf-8', errors='replace')
+
+lines = raw.split('\n')
+if offset > 0:
+    lines = lines[1:]  # first line may be partial
+
+for line in lines:
+    line = line.strip()
+    if line:
+        try: msgs.append(json.loads(line))
+        except json.JSONDecodeError: pass
 
 def extract_text(content):
     if isinstance(content, str): return content
     if isinstance(content, list):
-        return '\n'.join(p.get('text','') for p in content if isinstance(p,dict) and p.get('type')=='text')
+        parts = []
+        for p in content:
+            if not isinstance(p, dict): continue
+            if p.get('type') == 'text':
+                parts.append(p.get('text', ''))
+            elif p.get('type') == 'tool_result':
+                parts.append(extract_text(p.get('content', '')))
+        return '\n'.join(filter(None, parts))
     return ''
 
 # Find the most recent tui-canvas/tui-clear command trigger (has <command-name> tag)

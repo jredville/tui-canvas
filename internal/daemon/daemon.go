@@ -6,11 +6,14 @@ package daemon
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"log"
 	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -21,20 +24,38 @@ func sessionsPath(sockPath string) string {
 	return filepath.Join(filepath.Dir(sockPath), "sessions.json")
 }
 
-func loadSessions(path string) ([]protocol.Session, map[string]int) {
+func loadSessions(path string) []protocol.Session {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, make(map[string]int)
+		return nil
 	}
 	var sessions []protocol.Session
 	if err := json.Unmarshal(data, &sessions); err != nil {
-		return nil, make(map[string]int)
+		bak := path + ".bak"
+		log.Printf("daemon: sessions.json corrupt (%v); starting fresh, backup at %s", err, bak)
+		_ = os.Rename(path, bak)
+		return nil
 	}
-	nextIdx := make(map[string]int, len(sessions))
-	for _, s := range sessions {
-		nextIdx[s.ID] = len(s.Entries) + 1
+	return sessions
+}
+
+
+var oscRe = regexp.MustCompile(`\x1b[\]\[P_^][^\x1b\x07]*(?:\x07|\x1b\\)`)
+
+func sanitizeContent(s string) string {
+	s = oscRe.ReplaceAllString(s, "")
+	var b strings.Builder
+	for _, r := range s {
+		if r == '\t' || r == '\n' || r == '\r' {
+			b.WriteRune(r)
+			continue
+		}
+		if r < 0x20 || (r >= 0x7F && r <= 0x9F) {
+			continue
+		}
+		b.WriteRune(r)
 	}
-	return sessions, nextIdx
+	return b.String()
 }
 
 func saveSessions(st *state) {
@@ -47,7 +68,14 @@ func saveSessions(st *state) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(st.stateFile, data, 0o644)
+	st.saveMu.Lock()
+	defer st.saveMu.Unlock()
+	tmp := st.stateFile + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err == nil {
+		if err := os.Rename(tmp, st.stateFile); err != nil {
+			log.Printf("daemon: save sessions: %v", err)
+		}
+	}
 }
 
 // subscriber represents a connected TUI client.
@@ -59,8 +87,8 @@ type subscriber struct {
 // state is the daemon's canonical session store.
 type state struct {
 	mu        sync.RWMutex
+	saveMu    sync.Mutex
 	sessions  []protocol.Session
-	nextIdx   map[string]int // session_id → next entry index
 	stateFile string
 }
 
@@ -90,12 +118,6 @@ func newBroadcaster() *broadcaster {
 	return &broadcaster{subs: make(map[*subscriber]struct{})}
 }
 
-func (b *broadcaster) add(sub *subscriber) {
-	b.mu.Lock()
-	b.subs[sub] = struct{}{}
-	b.mu.Unlock()
-}
-
 func (b *broadcaster) remove(sub *subscriber) {
 	b.mu.Lock()
 	delete(b.subs, sub)
@@ -116,13 +138,18 @@ func (b *broadcaster) broadcast(msg []byte) {
 	}
 }
 
+func shutdown(sockPath string) {
+	os.Remove(sockPath)
+	os.Exit(0)
+}
+
 // Run starts the daemon: it binds the socket, handles signals, and accepts
 // connections until the process is terminated.
 func Run() {
 	sockPath := protocol.SocketPath()
 
-	// Ensure the directory exists.
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+	// Ensure the directory exists with restricted permissions.
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
 		log.Fatalf("daemon: create socket dir: %v", err)
 	}
 
@@ -134,10 +161,11 @@ func Run() {
 		// Another daemon won the race – exit cleanly.
 		return
 	}
+	_ = os.Chmod(sockPath, 0o600)
 
 	stateFile := sessionsPath(sockPath)
-	sessions, nextIdx := loadSessions(stateFile)
-	st := &state{sessions: sessions, nextIdx: nextIdx, stateFile: stateFile}
+	sessions := loadSessions(stateFile)
+	st := &state{sessions: sessions, stateFile: stateFile}
 	bc := newBroadcaster()
 
 	// Clean up on signal.
@@ -146,8 +174,7 @@ func Run() {
 	go func() {
 		<-sigCh
 		ln.Close()
-		os.Remove(sockPath)
-		os.Exit(0)
+		shutdown(sockPath)
 	}()
 
 	log.Printf("daemon: listening on %s", sockPath)
@@ -158,15 +185,21 @@ func Run() {
 			// Listener was closed (e.g. signal handler fired).
 			return
 		}
-		go handleConn(conn, st, bc, ln)
+		go handleConn(conn, st, bc, ln, sockPath)
 	}
 }
 
+const maxMsgBytes = 2 * 1024 * 1024 // 2 MiB
+
 // handleConn reads the first line from conn to determine whether this is a
 // long-lived subscriber or a one-shot plugin message.
-func handleConn(conn net.Conn, st *state, bc *broadcaster, ln net.Listener) {
-	reader := bufio.NewReader(conn)
+func handleConn(conn net.Conn, st *state, bc *broadcaster, ln net.Listener, sockPath string) {
+	reader := bufio.NewReader(io.LimitReader(conn, maxMsgBytes+1))
 	line, err := reader.ReadBytes('\n')
+	if len(line) > maxMsgBytes {
+		conn.Close()
+		return
+	}
 	if err != nil {
 		conn.Close()
 		return
@@ -179,10 +212,10 @@ func handleConn(conn net.Conn, st *state, bc *broadcaster, ln net.Listener) {
 	}
 
 	switch env.Type {
-	case "subscribe":
+	case protocol.TypeSubscribe:
 		handleSubscriber(conn, reader, st, bc)
 	default:
-		handlePluginMessage(env.Type, line, conn, st, bc, ln)
+		handlePluginMessage(env.Type, line, conn, st, bc, ln, sockPath)
 		conn.Close()
 	}
 }
@@ -194,21 +227,26 @@ func handleSubscriber(conn net.Conn, _ *bufio.Reader, st *state, bc *broadcaster
 		send: make(chan []byte, 64),
 		conn: conn,
 	}
-	bc.add(sub)
 	defer func() {
 		bc.remove(sub)
 		conn.Close()
 	}()
 
-	// Send full state immediately.
+	// Compute snapshot, then register subscriber and enqueue full_state atomically
+	// so no broadcast can slip between registration and the initial state delivery.
 	snap := st.snapshot()
-	fs := protocol.FullState{Type: "full_state", Sessions: snap}
-	if b, err := protocol.Encode(fs); err == nil {
+	fs := protocol.FullState{Type: protocol.TypeFullState, Sessions: snap}
+	b, _ := protocol.Encode(fs)
+
+	bc.mu.Lock()
+	bc.subs[sub] = struct{}{}
+	if b != nil {
 		select {
 		case sub.send <- b:
 		default:
 		}
 	}
+	bc.mu.Unlock()
 
 	// Writer goroutine drains the send channel.
 	done := make(chan struct{})
@@ -235,9 +273,9 @@ func handleSubscriber(conn net.Conn, _ *bufio.Reader, st *state, bc *broadcaster
 }
 
 // handlePluginMessage processes a one-shot message from the plugin.
-func handlePluginMessage(msgType string, raw []byte, conn net.Conn, st *state, bc *broadcaster, ln net.Listener) {
+func handlePluginMessage(msgType string, raw []byte, conn net.Conn, st *state, bc *broadcaster, ln net.Listener, sockPath string) {
 	switch msgType {
-	case "session_register":
+	case protocol.TypeSessionRegister:
 		var msg protocol.SessionRegister
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			return
@@ -256,12 +294,11 @@ func handlePluginMessage(msgType string, raw []byte, conn net.Conn, st *state, b
 			Name: msg.Name,
 			CWD:  msg.CWD,
 		})
-		st.nextIdx[msg.SessionID] = 1
 		st.mu.Unlock()
 		saveSessions(st)
 
 		out := protocol.SessionAdded{
-			Type:      "session_added",
+			Type:      protocol.TypeSessionAdded,
 			SessionID: msg.SessionID,
 			Name:      msg.Name,
 			CWD:       msg.CWD,
@@ -270,27 +307,32 @@ func handlePluginMessage(msgType string, raw []byte, conn net.Conn, st *state, b
 			bc.broadcast(b)
 		}
 
-	case "canvas_append":
+	case protocol.TypeCanvasAppend:
 		var msg protocol.CanvasAppend
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			return
 		}
 
 		st.mu.Lock()
-		idx := st.nextIdx[msg.SessionID]
-		entry := protocol.Entry{Content: msg.Content, Index: idx}
+		sessionIdx := -1
 		for i := range st.sessions {
 			if st.sessions[i].ID == msg.SessionID {
-				st.sessions[i].Entries = append(st.sessions[i].Entries, entry)
+				sessionIdx = i
 				break
 			}
 		}
-		st.nextIdx[msg.SessionID] = idx + 1
+		if sessionIdx < 0 {
+			st.mu.Unlock()
+			return
+		}
+		idx := len(st.sessions[sessionIdx].Entries) + 1
+		entry := protocol.Entry{Content: sanitizeContent(msg.Content), Index: idx}
+		st.sessions[sessionIdx].Entries = append(st.sessions[sessionIdx].Entries, entry)
 		st.mu.Unlock()
 		saveSessions(st)
 
 		out := protocol.CanvasAppended{
-			Type:      "canvas_appended",
+			Type:      protocol.TypeCanvasAppended,
 			SessionID: msg.SessionID,
 			Entry:     entry,
 		}
@@ -298,32 +340,37 @@ func handlePluginMessage(msgType string, raw []byte, conn net.Conn, st *state, b
 			bc.broadcast(b)
 		}
 
-	case "canvas_clear":
+	case protocol.TypeCanvasClear:
 		var msg protocol.CanvasClear
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			return
 		}
 
 		st.mu.Lock()
+		found := false
 		for i := range st.sessions {
 			if st.sessions[i].ID == msg.SessionID {
 				st.sessions[i].Entries = nil
+				found = true
 				break
 			}
 		}
-		st.nextIdx[msg.SessionID] = 1
+		if !found {
+			st.mu.Unlock()
+			return
+		}
 		st.mu.Unlock()
 		saveSessions(st)
 
 		out := protocol.CanvasCleared{
-			Type:      "canvas_cleared",
+			Type:      protocol.TypeCanvasCleared,
 			SessionID: msg.SessionID,
 		}
 		if b, err := protocol.Encode(out); err == nil {
 			bc.broadcast(b)
 		}
 
-	case "session_remove":
+	case protocol.TypeSessionRemove:
 		var msg protocol.SessionRemove
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			return
@@ -333,25 +380,25 @@ func handlePluginMessage(msgType string, raw []byte, conn net.Conn, st *state, b
 		for i, s := range st.sessions {
 			if s.ID == msg.SessionID {
 				st.sessions = append(st.sessions[:i], st.sessions[i+1:]...)
-				delete(st.nextIdx, msg.SessionID)
 				break
 			}
 		}
 		st.mu.Unlock()
 		saveSessions(st)
 
-		out := protocol.SessionRemoved{Type: "session_removed", SessionID: msg.SessionID}
+		out := protocol.SessionRemoved{Type: protocol.TypeSessionRemoved, SessionID: msg.SessionID}
 		if b, err := protocol.Encode(out); err == nil {
 			bc.broadcast(b)
 		}
 
-	case "daemon_restart":
-		if b, err := protocol.Encode(protocol.DaemonRestarting{Type: "daemon_restarting"}); err == nil {
+	case protocol.TypeDaemonRestart:
+		if b, err := protocol.Encode(protocol.DaemonRestarting{Type: protocol.TypeDaemonRestarting}); err == nil {
 			bc.broadcast(b)
 		}
 		ln.Close()
+		shutdown(sockPath)
 
-	case "list_sessions":
+	case protocol.TypeListSessions:
 		var msg protocol.ListSessions
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			return
@@ -360,7 +407,7 @@ func handlePluginMessage(msgType string, raw []byte, conn net.Conn, st *state, b
 		st.mu.RLock()
 		var sessions []protocol.Session
 		for _, s := range st.sessions {
-			if msg.CWD == "" || s.CWD == msg.CWD {
+			if msg.CWD == "" || filepath.Clean(s.CWD) == filepath.Clean(msg.CWD) {
 				sessions = append(sessions, protocol.Session{
 					ID:   s.ID,
 					Name: s.Name,
@@ -370,7 +417,7 @@ func handlePluginMessage(msgType string, raw []byte, conn net.Conn, st *state, b
 		}
 		st.mu.RUnlock()
 
-		out := protocol.SessionsList{Type: "sessions_list", Sessions: sessions}
+		out := protocol.SessionsList{Type: protocol.TypeSessionsList, Sessions: sessions}
 		if b, err := protocol.Encode(out); err == nil {
 			_, _ = conn.Write(b)
 		}

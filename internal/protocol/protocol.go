@@ -8,6 +8,23 @@ import (
 	"time"
 )
 
+const (
+	TypeSessionRegister  = "session_register"
+	TypeCanvasAppend     = "canvas_append"
+	TypeCanvasClear      = "canvas_clear"
+	TypeListSessions     = "list_sessions"
+	TypeSessionsList     = "sessions_list"
+	TypeSubscribe        = "subscribe"
+	TypeFullState        = "full_state"
+	TypeSessionAdded     = "session_added"
+	TypeCanvasAppended   = "canvas_appended"
+	TypeCanvasCleared    = "canvas_cleared"
+	TypeSessionRemove    = "session_remove"
+	TypeSessionRemoved   = "session_removed"
+	TypeDaemonRestart    = "daemon_restart"
+	TypeDaemonRestarting = "daemon_restarting"
+)
+
 // Envelope is used for type-peeking before full decode.
 type Envelope struct {
 	Type string `json:"type"`

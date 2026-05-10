@@ -36,7 +36,7 @@ func (m *Model) View() string {
 		return "Reconnecting to daemon…\n"
 	}
 	if m.err != nil {
-		return fmt.Sprintf("Connection error: %v\n", m.err)
+		return fmt.Sprintf("Connection lost: %v\nPress R to retry.\n", m.err)
 	}
 	if !m.ready {
 		return "Connecting…\n"
@@ -123,12 +123,17 @@ func (m *Model) renderCanvas() string {
 		divider := dividerStyle.Render(fmt.Sprintf("── [%d] %s", entry.Index, strings.Repeat("─", 40)))
 		sb.WriteString(divider)
 		sb.WriteString("\n")
-		rendered, err := m.renderer.Render(entry.Content)
-		if err != nil {
-			sb.WriteString(entry.Content)
-		} else {
-			sb.WriteString(rendered)
+		cacheKey := m.renderEntryKey(session.ID, entry.Index)
+		rendered, ok := m.renderedEntries[cacheKey]
+		if !ok {
+			r, err := m.renderer.Render(entry.Content)
+			if err != nil {
+				r = entry.Content
+			}
+			m.renderedEntries[cacheKey] = r
+			rendered = r
 		}
+		sb.WriteString(rendered)
 	}
 	return sb.String()
 }

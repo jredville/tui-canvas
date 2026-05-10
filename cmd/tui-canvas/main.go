@@ -33,6 +33,9 @@ func main() {
 		case "daemon":
 			daemon.Run()
 			return
+		case "register":
+			runRegister()
+			return
 		case "send":
 			runSend()
 			return
@@ -60,18 +63,41 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, `tui-canvas — persistent canvas display panel for Claude sessions
+	fmt.Fprintln(os.Stderr, `tui-canvas runs as a background daemon + TUI display + Claude Code plugin.
+Start the TUI, then use /tui-canvas in a Claude session to push content.
 
 Usage:
   tui-canvas                  Start the TUI client (auto-starts daemon)
-  tui-canvas daemon           Run the background state server
-  tui-canvas append <id>      Read markdown from stdin and append to session canvas
-  tui-canvas clear <id>       Clear a session canvas
-  tui-canvas send             Read raw JSON from stdin and write to socket
+  tui-canvas append <id>      Read markdown from stdin and append to session canvas (get IDs: tui-canvas list)
+  tui-canvas clear <id>       Clear a session canvas (get IDs: tui-canvas list)
   tui-canvas list [--cwd DIR] List registered sessions (tab-separated: id name cwd)
   tui-canvas restart          Restart the background daemon (TUIs reconnect automatically)
   tui-canvas version          Print the version string
   tui-canvas help             Show this help message`)
+}
+
+// runRegister registers a session with the daemon using typed arguments (no shell injection risk).
+func runRegister() {
+	if len(os.Args) < 5 {
+		fmt.Fprintln(os.Stderr, "usage: tui-canvas register <id> <name> <cwd>")
+		os.Exit(1)
+	}
+	id, name, cwd := os.Args[2], os.Args[3], os.Args[4]
+	if !protocol.IsDaemonRunning() {
+		return
+	}
+	msg, err := protocol.Encode(protocol.SessionRegister{
+		Type: protocol.TypeSessionRegister, SessionID: id, Name: name, CWD: cwd,
+	})
+	if err != nil {
+		return
+	}
+	conn, err := net.DialTimeout("unix", protocol.SocketPath(), time.Second)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	_, _ = conn.Write(msg)
 }
 
 // runTUI starts the daemon if needed, connects, subscribes, and runs the TUI.
@@ -85,6 +111,7 @@ func runTUI() {
 			fmt.Fprintf(os.Stderr, "tui-canvas: failed to start daemon: %v\n", err)
 			os.Exit(1)
 		}
+		go cmd.Wait() //nolint // reap child so it doesn't become a zombie
 
 		// Poll until the socket is ready (up to 1 s).
 		deadline := time.Now().Add(time.Second)
@@ -103,7 +130,7 @@ func runTUI() {
 	}
 
 	// Send subscribe message.
-	sub := protocol.Subscribe{Type: "subscribe"}
+	sub := protocol.Subscribe{Type: protocol.TypeSubscribe}
 	b, err := protocol.Encode(sub)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tui-canvas: encode subscribe: %v\n", err)
@@ -150,7 +177,7 @@ func runList() {
 	}
 	defer conn.Close()
 
-	req := protocol.ListSessions{Type: "list_sessions", CWD: cwd}
+	req := protocol.ListSessions{Type: protocol.TypeListSessions, CWD: cwd}
 	b, err := protocol.Encode(req)
 	if err != nil {
 		return
@@ -187,7 +214,7 @@ func runAppend() {
 		return
 	}
 	msg, err := protocol.Encode(protocol.CanvasAppend{
-		Type:      "canvas_append",
+		Type:      protocol.TypeCanvasAppend,
 		SessionID: sessionID,
 		Content:   string(content),
 	})
@@ -213,7 +240,7 @@ func runClear() {
 		return
 	}
 	msg, err := protocol.Encode(protocol.CanvasClear{
-		Type:      "canvas_clear",
+		Type:      protocol.TypeCanvasClear,
 		SessionID: sessionID,
 	})
 	if err != nil {
@@ -269,6 +296,7 @@ func runRestart() {
 		return
 	}
 	defer conn.Close()
-	b, _ := protocol.Encode(protocol.DaemonRestart{Type: "daemon_restart"})
+	b, _ := protocol.Encode(protocol.DaemonRestart{Type: protocol.TypeDaemonRestart})
 	_, _ = conn.Write(b)
+	fmt.Fprintln(os.Stderr, "tui-canvas: restart sent")
 }

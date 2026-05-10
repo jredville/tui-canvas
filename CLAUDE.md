@@ -31,19 +31,22 @@ After `make install`, the running daemon must be restarted to pick up binary cha
 cmd/tui-canvas/main.go       entry point; subcommand dispatch
 internal/
   daemon/daemon.go            background state server
-  protocol/protocol.go        shared message types + socket path
+  protocol/protocol.go        shared message types + socket path + type constants
   tui/
     model.go                  bubbletea model + update logic
     view.go                   rendering (tab bar, viewport, help bar)
+    export_test.go            exported test helpers (build-tag: test only)
 plugin/
   .claude-plugin/plugin.json  plugin manifest
   hooks/
     hooks.json                SessionStart + Stop hook declarations
     session-start             bash script: registers session, writes session-$ID temp file
-    stop-push                 bash script: reads staging file, appends to canvas after each turn
+    stop-push                 bash script: reads transcript tail, appends to canvas after each turn
   skills/
     tui-canvas/SKILL.md       /tui-canvas skill (send content to canvas)
     tui-clear/SKILL.md        /tui-clear skill (clear canvas)
+docs/
+  plans/                      implementation plans (phase-1, phase-2, phase-3)
 ```
 
 ## Key Libraries

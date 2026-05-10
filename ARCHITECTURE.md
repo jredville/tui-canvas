@@ -7,9 +7,9 @@ tui-canvas is three cooperating subsystems in a single Go binary: a **daemon**, 
 │  Claude Code session (one per terminal tab)          │
 │                                                      │
 │  SessionStart hook ──registers──► daemon             │
-│                    └──writes──►  session-unknown file │
+│                    └──writes──►  session-$ID file     │
 │  /tui-canvas skill ──(no-op)──► says "Pushed to canvas."│
-│  Stop hook         ──reads transcript──► appends to daemon│
+│  Stop hook         ──reads transcript tail──► appends│
 │  /tui-clear skill  ──(no-op)──► says "Canvas cleared."│
 └─────────────────────────────────────────────────────┘
                                        │
@@ -41,7 +41,7 @@ The daemon is the single source of truth. It runs as a detached background proce
 - `subscribe` → long-lived TUI subscriber; receives `full_state` immediately then all future broadcast events
 - anything else → one-shot plugin message; processed then connection closed
 
-**Session state:** a slice of `protocol.Session` structs (ID, Name, CWD, Entries). Entries are indexed sequentially per session. A `nextIdx` map tracks the next entry index for each session.
+**Session state:** a slice of `protocol.Session` structs (ID, Name, CWD, Entries). Entries are indexed sequentially per session; the next index is derived from `len(Entries)+1` at append time — no separate map.
 
 **Persistence:** after every mutation (`session_register`, `canvas_append`, `canvas_clear`, `session_remove`) the full session list is marshaled to `~/.local/share/tui-canvas/sessions.json`. On startup the daemon reloads this file so sessions survive daemon restarts.
 
@@ -101,17 +101,20 @@ The plugin integrates tui-canvas into Claude Code. It has two components: a hook
 ### Hooks
 
 **`plugin/hooks/session-start`** — runs at `SessionStart`:
-1. Generates a UUID (via `uuidgen` or Python fallback); reuses existing session for the same CWD
-2. Sends `session_register` to the daemon
-3. Writes the tui-canvas session ID to `~/.local/share/tui-canvas/session-unknown` (`CLAUDE_CODE_SESSION_ID` is not available in `SessionStart` hooks; the stop hook falls back to this file)
-4. Returns `{}` (no `additionalContext` — session ID stays out of Claude's context)
+1. Exits immediately if `CLAUDE_CODE_SESSION_ID` is unset (returns `{}`)
+2. Generates a UUID (via `uuidgen` or Python fallback); reuses existing session for the same CWD
+3. Calls `tui-canvas register <id> <name> <cwd>` (typed subcommand — no shell injection risk)
+4. Writes the tui-canvas session ID to `~/.local/share/tui-canvas/session-$CLAUDE_CODE_SESSION_ID`
+5. Returns `{}` (no `additionalContext` — session ID stays out of Claude's context)
 
 **`plugin/hooks/stop-push`** — runs at `Stop` (after every turn):
 1. Reads the hook event JSON from stdin (provides `session_id` and `transcript_path`)
-2. Looks up the canvas session ID from `session-$CLAUDE_SESSION` (falls back to `session-unknown`)
-3. Scans the transcript backward for the most recent `<command-name>/tui-canvas...` or `<command-name>/tui-clear...` user message
-4. Exits if any assistant message already follows that command (means it was handled in a prior turn — the hook fires before the current response is written to the transcript)
-5. For `/tui-clear`: calls `tui-canvas clear`; for `/tui-canvas`: pushes `<command-args>` verbatim (if present) or the previous assistant response
+2. Validates `transcript_path` is under `~/.claude/` to prevent path traversal
+3. Looks up the canvas session ID from `session-$CLAUDE_SESSION`; exits if not found
+4. Reads the last 64 KB of the transcript (tail-scan to avoid O(N²) growth over long sessions)
+5. Scans backward for the most recent `<command-name>/tui-canvas...` or `<command-name>/tui-clear...` user message
+6. Exits if any assistant message already follows that command (means it was handled in a prior turn)
+7. For `/tui-clear`: calls `tui-canvas clear`; for `/tui-canvas`: pushes `<command-args>` verbatim (if present) or the previous assistant response
 
 ### Skills
 
@@ -131,12 +134,12 @@ All messages are newline-terminated JSON. The `type` field is the discriminator.
 
 | type | fields | effect |
 |------|--------|--------|
-| `session_register` | `session_id`, `name`, `cwd` | registers a new session (idempotent) |
-| `canvas_append` | `session_id`, `content` | appends a markdown entry to the session |
-| `canvas_clear` | `session_id` | removes all entries from the session |
+| `session_register` | `session_id`, `name`, `cwd` | registers a new session (idempotent); also sent by `tui-canvas register` |
+| `canvas_append` | `session_id`, `content` | appends a sanitized markdown entry; no-op if session unknown |
+| `canvas_clear` | `session_id` | removes all entries from the session; no-op if session unknown |
 | `session_remove` | `session_id` | removes the session and all its entries |
 | `list_sessions` | `cwd` (optional) | responds with `sessions_list` then closes |
-| `daemon_restart` | — | daemon broadcasts `daemon_restarting` then exits |
+| `daemon_restart` | — | daemon broadcasts `daemon_restarting` then exits cleanly |
 
 ### Daemon → Plugin (response)
 
