@@ -29,27 +29,14 @@ Each Claude Code session automatically registers itself on start. Claude can the
 
 ### 1. Install the Claude Code plugin
 
-The binary downloads automatically on first session start (requires `curl` and internet access). Supported platforms: Linux (amd64, arm64), macOS (amd64, arm64).
+Run these two slash commands inside Claude Code:
 
-Add to `~/.claude/settings.json`:
-
-```json
-{
-  "extraKnownMarketplaces": {
-    "tui-canvas": {
-      "source": {
-        "source": "github",
-        "repo": "jredville/tui-canvas"
-      }
-    }
-  },
-  "enabledPlugins": {
-    "tui-canvas@tui-canvas": true
-  }
-}
+```
+/plugin marketplace add jredville/tui-canvas
+/plugin install tui-canvas@tui-canvas
 ```
 
-Then run `/reload-plugins` in Claude Code.
+The binary downloads automatically on your first session start (requires `curl` and internet access). Supported platforms: Linux (amd64, arm64), macOS (amd64, arm64).
 
 ### 2. Open the TUI
 
