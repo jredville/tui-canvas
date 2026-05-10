@@ -8,14 +8,49 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"regexp"
+	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 
 	"tui-canvas/internal/protocol"
 )
+
+const tabBarHeight = 3
+
+type keyMap struct {
+	Quit    key.Binding
+	Debug   key.Binding
+	Kill    key.Binding
+	Restart key.Binding
+	TabNext key.Binding
+	TabPrev key.Binding
+	Search  key.Binding
+	Next    key.Binding
+	Prev    key.Binding
+	Confirm key.Binding
+	Cancel  key.Binding
+}
+
+var keys = keyMap{
+	Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+	Debug:   key.NewBinding(key.WithKeys("?"),           key.WithHelp("?", "debug")),
+	Kill:    key.NewBinding(key.WithKeys("x"),           key.WithHelp("x", "kill tab")),
+	Restart: key.NewBinding(key.WithKeys("R"),           key.WithHelp("R", "restart")),
+	TabNext: key.NewBinding(key.WithKeys("tab"),         key.WithHelp("tab", "next")),
+	TabPrev: key.NewBinding(key.WithKeys("shift+tab"),   key.WithHelp("shift+tab", "prev")),
+	Search:  key.NewBinding(key.WithKeys("/"),           key.WithHelp("/", "search")),
+	Next:    key.NewBinding(key.WithKeys("n"),           key.WithHelp("n", "next match")),
+	Prev:    key.NewBinding(key.WithKeys("p"),           key.WithHelp("p", "prev match")),
+	Confirm: key.NewBinding(key.WithKeys("enter")),
+	Cancel:  key.NewBinding(key.WithKeys("esc", "ctrl+c")),
+}
+
+var ansiEscRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 // socketMsg carries a raw newline-delimited JSON line from the daemon.
 // gen tracks which connection the message came from, so stale messages from
@@ -37,21 +72,29 @@ type reconnectFailedMsg struct{ err error }
 type restartSentMsg struct{}
 
 // Model is the bubbletea model for the TUI client.
+// Search has two phases: input (typing query) and nav (n/p between hits).
 type Model struct {
-	sessions     []protocol.Session
-	activeTab    int
-	viewport     viewport.Model
-	ch           chan tea.Msg
-	renderer     *glamour.TermRenderer
-	ready        bool
-	debug        bool
-	err          error
-	width        int
-	height       int
-	connGen      int   // incremented on each successful reconnect
-	reconnecting bool  // true while attempting to reconnect
-	confirming   bool  // true when waiting for second x to confirm kill
-	tabWidths    []int // rendered width of each tab, set by tabBar()
+	sessions        []protocol.Session
+	activeTab       int
+	viewport        viewport.Model
+	ch              chan tea.Msg
+	renderer        *glamour.TermRenderer
+	ready           bool
+	debug           bool
+	err             error
+	width           int
+	height          int
+	connGen         int
+	reconnecting    bool
+	confirming      bool
+	tabWidths       []int
+	searching       bool   // true while typing search query
+	searchActive    bool   // true while navigating confirmed hits
+	searchInput     string // in-progress query (while searching)
+	searchQuery     string // confirmed query (while searchActive)
+	searchHits      []int  // viewport line offsets of matches
+	searchIdx       int    // current hit index
+	renderedContent string // last content passed to viewport, pre-highlight
 }
 
 // New creates a Model and starts the background socket reader goroutine.
@@ -59,7 +102,7 @@ type Model struct {
 func New(conn net.Conn) (*Model, error) {
 	renderer, err := glamour.NewTermRenderer(
 		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(0),
+		glamour.WithWordWrap(80),
 	)
 	if err != nil {
 		return nil, err
@@ -104,14 +147,19 @@ func (m *Model) Init() tea.Cmd {
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		widthChanged := msg.Width != m.width
 		m.width = msg.Width
 		m.height = msg.Height
 		if !m.ready {
 			m.viewport = viewport.New(msg.Width, m.contentHeight())
 			m.ready = true
+			m.rebuildRenderer()
 		} else {
 			m.viewport.Width = msg.Width
 			m.viewport.Height = m.contentHeight()
+			if widthChanged {
+				m.rebuildRenderer()
+			}
 		}
 		m.refreshViewport()
 		return m, nil
@@ -180,60 +228,62 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
-			m.handleTabClick(msg.X, msg.Y)
+			if msg.Y < tabBarHeight {
+				m.handleTabClick(msg.X)
+			}
 		}
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.searching {
+			return m.updateSearchInput(msg)
+		}
+		if m.searchActive {
+			return m.updateSearchNav(msg)
+		}
 		if m.confirming {
 			m.confirming = false
-			if msg.String() == "x" && len(m.sessions) > 0 {
+			if key.Matches(msg, keys.Kill) && len(m.sessions) > 0 {
 				return m, sendSessionRemoveCmd(m.sessions[m.activeTab].ID)
 			}
 			return m, nil
 		}
-
-		switch msg.String() {
-		case "q", "ctrl+c":
+		switch {
+		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
-
-		case "?":
+		case key.Matches(msg, keys.Debug):
 			m.debug = !m.debug
-			return m, nil
-
-		case "x":
+		case key.Matches(msg, keys.Kill):
 			if len(m.sessions) > 0 {
 				m.confirming = true
 			}
-			return m, nil
-
-		case "R":
+		case key.Matches(msg, keys.Restart):
 			if !m.reconnecting {
 				m.reconnecting = true
 				// attempt=2 → 200 ms initial delay, giving the daemon time to exit.
 				return m, tea.Batch(sendDaemonRestartCmd(), reconnectCmd(2))
 			}
-			return m, nil
-
-		case "tab":
+		case key.Matches(msg, keys.TabNext):
 			if len(m.sessions) > 0 {
 				m.activeTab = (m.activeTab + 1) % len(m.sessions)
+				m.clearSearch()
 				m.refreshViewport()
 			}
-			return m, nil
-
-		case "shift+tab":
+		case key.Matches(msg, keys.TabPrev):
 			if len(m.sessions) > 0 {
 				m.activeTab = (m.activeTab - 1 + len(m.sessions)) % len(m.sessions)
+				m.clearSearch()
 				m.refreshViewport()
 			}
-			return m, nil
-
+		case key.Matches(msg, keys.Search):
+			m.enterSearch()
 		default:
+			// n/p pass through to viewport in normal mode
 			var cmd tea.Cmd
 			m.viewport, cmd = m.viewport.Update(msg)
 			return m, cmd
 		}
+		return m, nil
 	}
 
 	return m, nil
@@ -386,7 +436,6 @@ func sendDaemonRestartCmd() tea.Cmd {
 
 // contentHeight computes the viewport height given the current terminal size.
 func (m *Model) contentHeight() int {
-	const tabBarHeight = 3
 	const helpBarHeight = 1
 	h := m.height - tabBarHeight - helpBarHeight
 	if h < 1 {
@@ -396,12 +445,12 @@ func (m *Model) contentHeight() int {
 }
 
 // handleTabClick switches to the tab whose rendered width contains column x.
-// The tab bar occupies the top rows; y is ignored.
-func (m *Model) handleTabClick(x, _ int) {
+func (m *Model) handleTabClick(x int) {
 	cursor := 0
 	for i, w := range m.tabWidths {
 		if x < cursor+w {
 			m.activeTab = i
+			m.clearSearch()
 			m.refreshViewport()
 			return
 		}
@@ -417,5 +466,183 @@ func (m *Model) refreshViewport() {
 	}
 	m.viewport.Height = m.contentHeight()
 	m.viewport.Width = m.width
-	m.viewport.SetContent(m.renderCanvas())
+	content := m.renderCanvas()
+	m.renderedContent = content
+	if m.searchActive && m.searchQuery != "" {
+		m.updateSearch(m.searchQuery)
+	} else if m.searching && m.searchInput != "" {
+		m.updateSearch(m.searchInput)
+	}
+	m.viewport.SetContent(m.contentForDisplay())
+	if (m.searchActive || m.searching) && len(m.searchHits) > 0 {
+		m.viewport.SetYOffset(m.searchHits[m.searchIdx])
+	}
+}
+
+// rebuildRenderer recreates the glamour renderer at the current terminal width.
+func (m *Model) rebuildRenderer() {
+	r, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(m.width),
+	)
+	if err == nil {
+		m.renderer = r
+	}
+}
+
+// contentForDisplay returns renderedContent with the matched text on the
+// current hit line highlighted. Active during both search input and nav modes.
+func (m *Model) contentForDisplay() string {
+	if len(m.searchHits) == 0 || (!m.searchActive && !m.searching) {
+		return m.renderedContent
+	}
+	query := m.searchQuery
+	if m.searching {
+		query = m.searchInput
+	}
+	lines := strings.Split(m.renderedContent, "\n")
+	hitLine := m.searchHits[m.searchIdx]
+	if hitLine < len(lines) {
+		plain := ansiEscRe.ReplaceAllString(lines[hitLine], "")
+		lowerPlain := strings.ToLower(plain)
+		lowerQ := strings.ToLower(query)
+		if idx := strings.Index(lowerPlain, lowerQ); idx >= 0 {
+			before := plain[:idx]
+			match := plain[idx : idx+len(lowerQ)]
+			after := plain[idx+len(lowerQ):]
+			lines[hitLine] = before + searchHighlightStyle.Render(match) + after
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// clearSearch resets all search state.
+func (m *Model) clearSearch() {
+	m.searching = false
+	m.searchActive = false
+	m.searchInput = ""
+	m.searchQuery = ""
+	m.searchHits = nil
+	m.searchIdx = 0
+}
+
+// enterSearch switches to search input mode.
+func (m *Model) enterSearch() {
+	m.searching = true
+	m.searchActive = false
+	m.searchInput = ""
+}
+
+// confirmSearch transitions from input mode to navigation mode.
+func (m *Model) confirmSearch() {
+	m.searching = false
+	m.searchQuery = m.searchInput
+	m.searchInput = ""
+	m.searchActive = true
+	m.searchIdx = 0
+	m.updateSearch(m.searchQuery)
+	m.scrollToHit()
+}
+
+// updateSearch rebuilds searchHits from renderedContent for the given query.
+func (m *Model) updateSearch(query string) {
+	m.searchHits = nil
+	if query == "" {
+		return
+	}
+	q := strings.ToLower(query)
+	for i, line := range strings.Split(m.renderedContent, "\n") {
+		plain := ansiEscRe.ReplaceAllString(line, "")
+		if strings.Contains(strings.ToLower(plain), q) {
+			m.searchHits = append(m.searchHits, i)
+		}
+	}
+	if m.searchIdx >= len(m.searchHits) {
+		m.searchIdx = 0
+	}
+}
+
+// scrollToHit updates viewport content (for highlight) and scrolls to the hit.
+func (m *Model) scrollToHit() {
+	if len(m.searchHits) == 0 {
+		return
+	}
+	m.viewport.SetContent(m.contentForDisplay())
+	m.viewport.SetYOffset(m.searchHits[m.searchIdx])
+}
+
+// nextHit advances to the next search match, looping at the end.
+func (m *Model) nextHit() {
+	if len(m.searchHits) == 0 {
+		return
+	}
+	m.searchIdx = (m.searchIdx + 1) % len(m.searchHits)
+	m.scrollToHit()
+}
+
+// prevHit goes to the previous search match, looping at the start.
+func (m *Model) prevHit() {
+	if len(m.searchHits) == 0 {
+		return
+	}
+	m.searchIdx = (m.searchIdx - 1 + len(m.searchHits)) % len(m.searchHits)
+	m.scrollToHit()
+}
+
+// updateSearchInput handles key events while typing a search query.
+func (m *Model) updateSearchInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, keys.Confirm):
+		if m.searchInput != "" {
+			m.confirmSearch()
+		} else {
+			m.clearSearch()
+			m.viewport.SetContent(m.renderedContent)
+		}
+	case key.Matches(msg, keys.Cancel):
+		m.clearSearch()
+		m.viewport.SetContent(m.renderedContent)
+		m.viewport.GotoTop()
+	case msg.String() == "backspace" || msg.String() == "ctrl+h":
+		runes := []rune(m.searchInput)
+		if len(runes) > 0 {
+			m.searchInput = string(runes[:len(runes)-1])
+			m.searchIdx = 0
+			m.updateSearch(m.searchInput)
+			m.scrollToHit()
+		}
+	default:
+		if len(msg.Runes) == 1 {
+			m.searchInput += string(msg.Runes)
+			m.searchIdx = 0
+			m.updateSearch(m.searchInput)
+			m.scrollToHit()
+		}
+	}
+	return m, nil
+}
+
+// updateSearchNav handles key events while navigating search hits.
+func (m *Model) updateSearchNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, keys.Next):
+		m.nextHit()
+	case key.Matches(msg, keys.Prev):
+		m.prevHit()
+	case key.Matches(msg, keys.Confirm):
+		m.clearSearch()
+		m.viewport.SetContent(m.renderedContent)
+	case key.Matches(msg, keys.Cancel):
+		m.clearSearch()
+		m.viewport.SetContent(m.renderedContent)
+		m.viewport.GotoTop()
+	case key.Matches(msg, keys.Search):
+		m.clearSearch()
+		m.enterSearch()
+	default:
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		return m, cmd
+	}
+	return m, nil
 }
