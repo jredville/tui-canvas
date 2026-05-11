@@ -72,31 +72,41 @@ type reconnectRetryMsg struct{ attempt int }
 type reconnectFailedMsg struct{ err error }
 type restartSentMsg struct{}
 
+// highlightFadeMsg triggers a highlight phase transition for a newly appended entry.
+type highlightFadeMsg struct {
+	sessionID  string
+	entryIndex int
+	nextPhase  int
+}
+
 // Model is the bubbletea model for the TUI client.
 // Search has two phases: input (typing query) and nav (n/p between hits).
 type Model struct {
-	sessions        []protocol.Session
-	activeTab       int
-	viewport        viewport.Model
-	ch              chan tea.Msg
-	renderer        *glamour.TermRenderer
-	ready           bool
-	debug           bool
-	err             error
-	width           int
-	height          int
-	connGen         int
-	reconnecting    bool
-	confirming      bool
-	tabWidths       []int
-	searching       bool   // true while typing search query
-	searchActive    bool   // true while navigating confirmed hits
-	searchInput     string // in-progress query (while searching)
-	searchQuery     string // confirmed query (while searchActive)
-	searchHits      []int  // viewport line offsets of matches
-	searchIdx       int    // current hit index
-	renderedContent string // last content passed to viewport, pre-highlight
-	renderedEntries map[string]string // sessionID:index → rendered markdown
+	sessions         []protocol.Session
+	activeTab        int
+	viewport         viewport.Model
+	ch               chan tea.Msg
+	renderer         *glamour.TermRenderer
+	ready            bool
+	debug            bool
+	err              error
+	width            int
+	height           int
+	connGen          int
+	reconnecting     bool
+	confirming       bool
+	tabWidths        []int
+	searching        bool   // true while typing search query
+	searchActive     bool   // true while navigating confirmed hits
+	searchInput      string // in-progress query (while searching)
+	searchQuery      string // confirmed query (while searchActive)
+	searchHits       []int  // viewport line offsets of matches
+	searchIdx        int    // current hit index
+	renderedContent  string // last content passed to viewport, pre-highlight
+	renderedEntries  map[string]string // sessionID:index → rendered markdown
+	highlightSession string // session ID of the most recently appended entry
+	highlightIndex   int    // entry Index of the highlighted entry
+	highlightPhase   int    // 2=bright, 1=dim, 0=none
 }
 
 // New creates a Model and starts the background socket reader goroutine.
@@ -182,10 +192,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, waitForMsg(m.ch)
 		}
+		var extra tea.Cmd
 		if !m.reconnecting {
-			m.handleSocketMsg(msg.data)
+			extra = m.handleSocketMsg(msg.data)
 		}
-		return m, waitForMsg(m.ch)
+		return m, tea.Batch(waitForMsg(m.ch), extra)
 
 	case socketErrMsg:
 		if msg.gen != m.connGen {
@@ -229,10 +240,29 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case restartSentMsg:
 		return m, nil
 
+	case highlightFadeMsg:
+		if msg.sessionID == m.highlightSession && msg.entryIndex == m.highlightIndex {
+			m.highlightPhase = msg.nextPhase
+			m.refreshViewport()
+			if msg.nextPhase == 1 {
+				return m, tea.Tick(1500*time.Millisecond, func(t time.Time) tea.Msg {
+					return highlightFadeMsg{sessionID: msg.sessionID, entryIndex: msg.entryIndex, nextPhase: 0}
+				})
+			}
+		}
+		return m, nil
+
 	case tea.MouseMsg:
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
-			if msg.Y < tabBarHeight {
-				m.handleTabClick(msg.X)
+		if msg.Action == tea.MouseActionPress {
+			switch msg.Button {
+			case tea.MouseButtonLeft:
+				if msg.Y < tabBarHeight {
+					m.handleTabClick(msg.X)
+				}
+			case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+				var cmd tea.Cmd
+				m.viewport, cmd = m.viewport.Update(msg)
+				return m, cmd
 			}
 		}
 		return m, nil
@@ -297,18 +327,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleSocketMsg parses a raw daemon message and updates local state.
-func (m *Model) handleSocketMsg(raw []byte) {
+// handleSocketMsg parses a raw daemon message, updates local state, and returns
+// any Cmd needed (e.g. a highlight-fade tick for newly appended entries).
+func (m *Model) handleSocketMsg(raw []byte) tea.Cmd {
 	var env protocol.Envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return
+		return nil
 	}
 
 	switch env.Type {
 	case protocol.TypeFullState:
 		var msg protocol.FullState
 		if err := json.Unmarshal(raw, &msg); err != nil {
-			return
+			return nil
 		}
 		m.sessions = msg.Sessions
 		m.renderedEntries = make(map[string]string)
@@ -320,7 +351,7 @@ func (m *Model) handleSocketMsg(raw []byte) {
 	case protocol.TypeSessionAdded:
 		var msg protocol.SessionAdded
 		if err := json.Unmarshal(raw, &msg); err != nil {
-			return
+			return nil
 		}
 		m.sessions = append(m.sessions, protocol.Session{
 			ID:   msg.SessionID,
@@ -332,7 +363,7 @@ func (m *Model) handleSocketMsg(raw []byte) {
 	case protocol.TypeCanvasAppended:
 		var msg protocol.CanvasAppended
 		if err := json.Unmarshal(raw, &msg); err != nil {
-			return
+			return nil
 		}
 		for i := range m.sessions {
 			if m.sessions[i].ID == msg.SessionID {
@@ -340,12 +371,25 @@ func (m *Model) handleSocketMsg(raw []byte) {
 				break
 			}
 		}
+		m.highlightSession = msg.SessionID
+		m.highlightIndex = msg.Entry.Index
+		m.highlightPhase = 2
 		m.refreshViewport()
+		if len(m.sessions) > m.activeTab &&
+			m.sessions[m.activeTab].ID == msg.SessionID &&
+			!m.searching && !m.searchActive {
+			m.viewport.GotoBottom()
+		}
+		entryIndex := msg.Entry.Index
+		sessionID := msg.SessionID
+		return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+			return highlightFadeMsg{sessionID: sessionID, entryIndex: entryIndex, nextPhase: 1}
+		})
 
 	case protocol.TypeCanvasCleared:
 		var msg protocol.CanvasCleared
 		if err := json.Unmarshal(raw, &msg); err != nil {
-			return
+			return nil
 		}
 		prefix := msg.SessionID + ":"
 		for k := range m.renderedEntries {
@@ -364,7 +408,7 @@ func (m *Model) handleSocketMsg(raw []byte) {
 	case protocol.TypeSessionRemoved:
 		var msg protocol.SessionRemoved
 		if err := json.Unmarshal(raw, &msg); err != nil {
-			return
+			return nil
 		}
 		for i, s := range m.sessions {
 			if s.ID == msg.SessionID {
@@ -377,6 +421,7 @@ func (m *Model) handleSocketMsg(raw []byte) {
 		}
 		m.refreshViewport()
 	}
+	return nil
 }
 
 func (m *Model) renderEntryKey(sessionID string, index int) string {

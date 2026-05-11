@@ -28,6 +28,13 @@ var (
 	searchHighlightStyle = lipgloss.NewStyle().
 				Background(lipgloss.Color("226")).
 				Foreground(lipgloss.Color("0"))
+
+	newEntryBrightStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("220")).
+				Bold(true)
+
+	newEntryDimStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("178"))
 )
 
 // View renders the full TUI layout: tab bar, viewport, help bar.
@@ -108,6 +115,21 @@ func (m *Model) helpBar() string {
 		"tab/shift+tab: switch  ↑↓/jk: scroll  /: search  x: kill  ?: debug  R: restart  q: quit")
 }
 
+// renderDivider returns the styled divider line for an entry, applying the
+// highlight animation style when this is the most recently appended entry.
+func (m *Model) renderDivider(sessionID string, entryIndex int) string {
+	base := fmt.Sprintf("── [%d] %s", entryIndex, strings.Repeat("─", 40))
+	if sessionID == m.highlightSession && entryIndex == m.highlightIndex {
+		switch m.highlightPhase {
+		case 2:
+			return newEntryBrightStyle.Render(base)
+		case 1:
+			return newEntryDimStyle.Render(base)
+		}
+	}
+	return dividerStyle.Render(base)
+}
+
 // renderCanvas builds the scrollable content string for the active session.
 func (m *Model) renderCanvas() string {
 	if len(m.sessions) == 0 {
@@ -120,7 +142,7 @@ func (m *Model) renderCanvas() string {
 
 	var sb strings.Builder
 	for _, entry := range session.Entries {
-		divider := dividerStyle.Render(fmt.Sprintf("── [%d] %s", entry.Index, strings.Repeat("─", 40)))
+		divider := m.renderDivider(session.ID, entry.Index)
 		sb.WriteString(divider)
 		sb.WriteString("\n")
 		cacheKey := m.renderEntryKey(session.ID, entry.Index)

@@ -24,7 +24,7 @@ func NewTestModel() (*Model, error) {
 }
 
 func (m *Model) HandleSocketMsgForTest(raw []byte) {
-	m.handleSocketMsg(raw)
+	_ = m.handleSocketMsg(raw)
 }
 
 func (m *Model) Sessions() []protocol.Session {
